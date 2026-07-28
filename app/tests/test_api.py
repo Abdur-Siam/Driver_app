@@ -1169,3 +1169,155 @@ def test_legacy_fail_photo_in_pod_photo_still_readable(client):
     conn.commit()
     pod = client.get(f"/api/driver/v1/jobs/{d}", headers=h).get_json()["job"]["pod"]
     assert pod[0]["photo"] and pod[0]["photo"].startswith("/media/legacy_fail.png")
+
+
+# ── breaks, shift-end summary, vehicle check, history POD re-access ──
+
+def _minutes_ago(mins):
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(minutes=mins)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_break_flow(client):
+    h = _auth(client)
+    client.post("/api/driver/v1/shift/start", json={"planned_end": "18:00"}, headers=h)
+    # Start a break → duty on_break, break clock open.
+    r = client.post("/api/driver/v1/status", json={"status": "on_break"}, headers=h)
+    assert r.status_code == 200
+    b = client.get("/api/driver/v1/shift", headers=h).get_json()
+    assert b["duty_status"] == "on_break" and b["shift"]["break_started_at"]
+    # Backdate the break start, then end the break → minutes accumulate.
+    from backend.db import get_connection
+    conn = get_connection()
+    conn.execute("UPDATE shifts SET break_started_at = ? WHERE id = ?",
+                 (_minutes_ago(10), b["shift"]["id"]))
+    conn.commit()
+    assert client.post("/api/driver/v1/status", json={"status": "available"}, headers=h).status_code == 200
+    b2 = client.get("/api/driver/v1/shift", headers=h).get_json()
+    assert b2["shift"]["break_started_at"] is None
+    assert b2["shift"]["break_minutes"] == 10
+
+
+def test_break_requires_active_shift(client):
+    h = _auth(client)
+    r = client.post("/api/driver/v1/status", json={"status": "on_break"}, headers=h)
+    assert r.status_code == 409 and r.get_json()["error"]["code"] == "no_active_shift"
+
+
+def test_shift_end_summary(client):
+    h = _auth(client)
+    # Drop the seeded demo trail — its newest point lands in the same second
+    # the shift starts, which would pollute the distance assertion.
+    from backend.db import get_connection as _gc
+    _gc().execute("DELETE FROM locations WHERE driver_id = 'DRV001'")
+    _gc().commit()
+    client.post("/api/driver/v1/consent/location", json={"granted": True}, headers=h)
+    client.post("/api/driver/v1/shift/start", json={"planned_end": "18:00"}, headers=h)
+    # Complete a job during the shift.
+    d = _drive_to_pob(client, h)
+    assert client.post(f"/api/driver/v1/jobs/{d}/pod",
+                       json={"drop_seq": 1, "recipient_name": "Mailroom"}, headers=h).status_code == 200
+    # GPS points inside the window (~1.3 km apart). Stamp them with the
+    # shift's own start_at so they sit inside [start, end] even though the
+    # whole test runs in well under a second.
+    start_at = client.get("/api/driver/v1/shift", headers=h).get_json()["shift"]["start_at"]
+    client.post("/api/driver/v1/location/batch", json={"pings": [
+        {"id": "s-1", "t": start_at, "lat": 51.50, "lng": -0.12},
+        {"id": "s-2", "t": start_at, "lat": 51.51, "lng": -0.11},
+    ]}, headers=h)
+    # Pretend a 10-minute break was taken.
+    from backend.db import get_connection
+    conn = get_connection()
+    conn.execute("UPDATE shifts SET break_minutes = 10 WHERE driver_id = 'DRV001' AND status = 'active'")
+    conn.commit()
+    r = client.post("/api/driver/v1/shift/end", headers=h)
+    assert r.status_code == 200
+    s = r.get_json()["summary"]
+    assert s["jobs_completed"] == 1
+    assert s["drops_delivered"] == 1 and s["drops_failed"] == 0
+    assert s["break_minutes"] == 10
+    assert s["worked_minutes"] == max(0, s["duration_minutes"] - 10)
+    assert s["earnings"] == "19.80"           # 16.30 base + 3.50 waiting
+    assert 1.0 < s["distance_km"] < 1.7       # haversine over the two pings
+    assert s["ended_at"]
+
+
+def test_end_shift_closes_open_break(client):
+    h = _auth(client)
+    client.post("/api/driver/v1/shift/start", json={"planned_end": "18:00"}, headers=h)
+    client.post("/api/driver/v1/status", json={"status": "on_break"}, headers=h)
+    from backend.db import get_connection
+    conn = get_connection()
+    conn.execute("UPDATE shifts SET break_started_at = ? WHERE driver_id = 'DRV001' AND status = 'active'",
+                 (_minutes_ago(7),))
+    conn.commit()
+    s = client.post("/api/driver/v1/shift/end", headers=h).get_json()["summary"]
+    assert s["break_minutes"] == 7            # open break folded in at shift end
+
+
+def test_shift_end_without_shift_returns_null_summary(client):
+    h = _auth(client)
+    r = client.post("/api/driver/v1/shift/end", headers=h)
+    assert r.status_code == 200 and r.get_json()["summary"] is None
+
+
+def test_vehicle_check_flow(client):
+    h = _auth(client)
+    items = {"tyres": True, "lights": True, "bodywork": True,
+             "load_area": True, "oil_coolant": True, "wipers_washers": True}
+    # Requires an active shift.
+    r = client.post("/api/driver/v1/shift/vehicle-check",
+                    json={"odometer": 48200, "items": items}, headers=h)
+    assert r.status_code == 409 and r.get_json()["error"]["code"] == "no_active_shift"
+    client.post("/api/driver/v1/shift/start", json={"planned_end": "18:00"}, headers=h)
+    # Validation: missing item / junk odometer.
+    incomplete = dict(items); incomplete.pop("tyres")
+    assert client.post("/api/driver/v1/shift/vehicle-check",
+                       json={"odometer": 48200, "items": incomplete}, headers=h).status_code == 400
+    assert client.post("/api/driver/v1/shift/vehicle-check",
+                       json={"odometer": "junk", "items": items}, headers=h).status_code == 400
+    # All-pass check stores and surfaces on GET /shift.
+    r = client.post("/api/driver/v1/shift/vehicle-check",
+                    json={"odometer": 48200, "items": items}, headers=h)
+    assert r.status_code == 200 and r.get_json()["failed_items"] == []
+    vc = client.get("/api/driver/v1/shift", headers=h).get_json()["vehicle_check"]
+    assert vc["odometer"] == 48200 and vc["items"]["tyres"] is True
+
+
+def test_vehicle_check_defect_flags_ops_not_blocks(client):
+    h = _auth(client)
+    client.post("/api/driver/v1/shift/start", json={"planned_end": "18:00"}, headers=h)
+    items = {"tyres": True, "lights": False, "bodywork": True,
+             "load_area": True, "oil_coolant": True, "wipers_washers": False}
+    r = client.post("/api/driver/v1/shift/vehicle-check",
+                    json={"items": items, "defects": "nearside brake light out"}, headers=h)
+    assert r.status_code == 200
+    assert r.get_json()["failed_items"] == ["lights", "wipers_washers"]
+    # Shift stays active (advisory, never blocking).
+    assert client.get("/api/driver/v1/shift", headers=h).get_json()["shift"]["status"] == "active"
+    # The defect rode the existing message channel to ops.
+    msgs = client.get("/api/driver/v1/messages", headers=h).get_json()["messages"]
+    flag = next(m for m in msgs if m["category"] == "vehicle_check")
+    assert "lights" in flag["text"] and "nearside brake light out" in flag["text"]
+    assert flag["direction"] == "driver"     # counts on the ops unread badge
+
+
+def test_history_job_detail_returns_pod_for_reaccess(client):
+    h = _auth(client)
+    d = _drive_to_pob(client, h)
+    png = ("data:image/png;base64,"
+           "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    client.post(f"/api/driver/v1/jobs/{d}/pod",
+                json={"drop_seq": 1, "recipient_name": "Mailroom", "signature": png,
+                      "photos": [png], "lat": 51.53, "lng": -0.12}, headers=h)
+    # Job is now COMPLETED and in history…
+    hist = client.get("/api/driver/v1/history", headers=h).get_json()["jobs"]
+    assert any(j["docket_number"] == d for j in hist)
+    # …and the detail read still serves the full POD with signed media URLs.
+    job = client.get(f"/api/driver/v1/jobs/{d}", headers=h).get_json()["job"]
+    assert job["status"] == "COMPLETED"
+    pod = job["pod"][0]
+    assert pod["recipient"] == "Mailroom" and pod["at"]
+    assert pod["signature"].startswith("/media/") and "sig=" in pod["signature"]
+    assert pod["photos"] and all("sig=" in p for p in pod["photos"])
+    assert pod["lat"] == 51.53 and pod["lng"] == -0.12

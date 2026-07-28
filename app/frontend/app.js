@@ -195,6 +195,7 @@ function shiftRemaining(plannedEnd) {
 function dutyPill() {
   if (S.dutyStatus === 'available') return '<span class="pill green">● Available</span>';
   if (S.dutyStatus === 'going_home') return '<span class="pill amber">⌂ Going home</span>';
+  if (S.dutyStatus === 'on_break') return '<span class="pill amber">⏸ On break</span>';
   return '<span class="pill grey">○ Off shift</span>';
 }
 
@@ -877,14 +878,68 @@ function messagesScreen() {
 
 /* ── job history ── */
 function historyScreen() {
-  const wrap = el('<div></div>'); wrap.appendChild(el(header('Job history', 'Completed work')));
+  const wrap = el('<div></div>'); wrap.appendChild(el(header('Job history', 'Tap a job for details & proof')));
   const main = el('<main></main>');
   if (!S.history.length) main.appendChild(el(`<div class="empty"><div class="big">📋</div><div>No completed jobs yet.</div></div>`));
-  S.history.forEach(j => main.appendChild(el(`<div class="card"><div class="row"><div class="stack">
+  S.history.forEach(j => {
+    const c = el(`<div class="card tap"><div class="row"><div class="stack">
     <div style="font-weight:700">${esc(j.account || 'Job')} <span class="mono tiny muted">${esc(j.docket_number)}</span></div>
     <div class="tiny muted">${esc(j.operational_date || '')} · ${esc(j.vehicle || '')}</div></div>
     <div class="stack" style="align-items:flex-end"><b>${gbp(j.driver_pay_final)}</b>
-    <span class="pill ${j.status === 'COMPLETED' ? 'green' : 'red'}">${j.status === 'COMPLETED' ? 'Delivered' : esc(j.status)}</span></div></div></div>`)));
+    <span class="pill ${j.status === 'COMPLETED' ? 'green' : 'red'}">${j.status === 'COMPLETED' ? 'Delivered' : esc(j.status)}</span></div></div></div>`);
+    c.onclick = () => go('#/history-job/' + j.docket_number);
+    main.appendChild(c);
+  });
+  wrap.appendChild(main); wrap.appendChild(el(nav('run')));
+  return wrap;
+}
+
+/* ── history job detail (status, stops, POD re-access) ── */
+function historyJobScreen() {
+  const j = S.job;
+  const wrap = el('<div></div>');
+  wrap.appendChild(el(header(j ? (j.account || 'Job') : 'Job', j ? j.docket_number : '')));
+  const main = el('<main></main>');
+  if (!j) {
+    main.appendChild(el(`<div class="empty"><div class="big">⚠️</div><div>Job not found.</div></div>`));
+    main.appendChild(backBtn()); wrap.appendChild(main); return wrap;
+  }
+  const done = j.status === 'COMPLETED';
+  main.appendChild(el(`<div class="card"><div class="row"><div class="stack">
+    <div style="font-weight:700">${esc(j.account || 'Job')} · ${esc(j.vehicle || '')}</div>
+    <div class="muted small">${esc(j.operational_date || '')}${j.deadline ? ' · deadline ' + esc(j.deadline) : ''}</div>
+    <div class="muted small">${gbp(j.driver_pay_final)}</div></div>
+    <span class="pill ${done ? 'green' : 'red'}">${done ? 'Delivered' : esc(j.status)}</span></div></div>`));
+  main.appendChild(el(`<div class="section-title">Pickup</div>
+    <div class="card"><div class="stack">
+      <div style="font-weight:700">${esc(j.pickup.address || j.pickup.postcode || '')}</div>
+      <div class="muted small">${esc(j.pickup.postcode || '')}${j.pickup.contact ? ' · ' + esc(j.pickup.contact) : ''}</div>
+    </div></div>`));
+  main.appendChild(el(`<div class="section-title">Stops (${j.drops.length})</div>`));
+  j.drops.forEach(d => {
+    const rec = (j.pod || []).find(p => p.seq === d.seq);
+    const pill = d.status === 'delivered' ? '<span class="pill green">Delivered</span>'
+      : d.status === 'failed' ? '<span class="pill red">Failed</span>'
+      : `<span class="pill grey">${esc(d.status)}</span>`;
+    const c = el(`<div class="card"><div class="row"><div class="stack">
+      <div style="font-weight:700">${d.seq}. ${esc(d.address || d.postcode || '')}</div>
+      <div class="muted small">${esc(d.postcode || '')}${d.contact ? ' · ' + esc(d.contact) : ''}</div>
+    </div>${pill}</div></div>`);
+    if (rec) {
+      const when = rec.at ? new Date(rec.at).toLocaleString([], { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }) : '';
+      if (d.status === 'delivered') {
+        c.appendChild(el(`<div class="tiny muted" style="margin-top:8px">✍️ Received by <b>${esc(rec.recipient || '—')}</b>${when ? ' · ' + esc(when) : ''}</div>`));
+      } else {
+        c.appendChild(el(`<div class="tiny" style="margin-top:8px;color:var(--danger)">Failed — ${esc(rec.fail_reason || 'no reason recorded')}${when ? ' · ' + esc(when) : ''}</div>`));
+      }
+      if (rec.note) c.appendChild(el(`<div class="tiny muted" style="margin-top:4px">“${esc(rec.note)}”</div>`));
+      const imgs = [rec.signature, ...(rec.photos || [])].filter(Boolean);
+      if (imgs.length) c.appendChild(el(`<div class="pod-thumbs" style="margin-top:8px">${imgs.map(u =>
+        `<div class="pod-thumb"><img src="${esc(mediaUrl(u))}" alt="Proof"/></div>`).join('')}</div>`));
+    }
+    main.appendChild(c);
+  });
+  main.appendChild(backBtn());
   wrap.appendChild(main); wrap.appendChild(el(nav('run')));
   return wrap;
 }
@@ -892,7 +947,16 @@ function historyScreen() {
 /* ── shift control ── */
 async function setDuty(status) {
   const r = await mutate('/status', { status });
-  if (r.ok || r.queued) { S.dutyStatus = status; toast(status === 'going_home' ? 'Going home — winding-down jobs only' : 'Available'); render(); }
+  if (r.ok || r.queued) {
+    S.dutyStatus = status;
+    toast(status === 'going_home' ? 'Going home — winding-down jobs only'
+      : status === 'on_break' ? 'Break started — timer paused for your stats'
+      : status === 'available' && r.ok ? 'Available' : 'Updated');
+    await loadShift(); render();
+  } else {
+    const code = r.data && r.data.error && r.data.error.code;
+    toast(code === 'no_active_shift' ? 'Start a shift first' : 'Could not update', true);
+  }
 }
 async function endShift() {
   const r = await mutate('/shift/end', {});
@@ -903,8 +967,30 @@ async function endShift() {
     // the server still accepts those (their timestamps predate shift end).
     stopTracking();
     flushPings();
-    toast('Shift ended'); go('#/home');
+    go('#/home');
+    const summary = r.ok && r.data && r.data.summary;
+    if (summary) shiftSummarySheet(summary);
+    else toast('Shift ended');   // queued offline — summary needs the server
   }
+}
+function shiftSummarySheet(s) {
+  const dur = (m) => `${Math.floor((m || 0) / 60)}h ${(m || 0) % 60}m`;
+  const bg = el(`<div class="sheet-bg"><div class="sheet">
+    <div class="icon" style="font-size:30px">🏁</div><h3>Shift summary</h3>
+    <div class="kv"><span class="k">On duty</span><span>${dur(s.duration_minutes)}</span></div>
+    ${s.break_minutes ? `<div class="kv"><span class="k">Breaks (excluded)</span><span>${dur(s.break_minutes)}</span></div>
+      <div class="kv"><span class="k">Worked</span><span>${dur(s.worked_minutes)}</span></div>` : ''}
+    <div class="kv"><span class="k">Jobs completed</span><span>${s.jobs_completed}</span></div>
+    <div class="kv"><span class="k">Drops delivered</span><span>${s.drops_delivered}</span></div>
+    ${s.drops_failed ? `<div class="kv"><span class="k">Drops failed</span><span style="color:var(--danger)">${s.drops_failed}</span></div>` : ''}
+    ${Number(s.distance_km) > 0 ? `<div class="kv"><span class="k">Distance (GPS)</span><span>${s.distance_km} km</span></div>` : ''}
+    <div class="kv" style="border-top:1px solid var(--line);padding-top:10px">
+      <span class="k" style="font-weight:700;color:var(--text)">Earned this shift</span>
+      <span style="font-weight:800;font-size:18px">${gbp(s.earnings)}</span></div>
+    <button class="btn" style="margin-top:14px">Done</button></div></div>`);
+  bg.querySelector('button').onclick = () => bg.remove();
+  bg.addEventListener('click', e => { if (e.target === bg) bg.remove(); });
+  document.body.appendChild(bg);
 }
 function shiftBlock() {
   if (!S.shift) {
@@ -915,17 +1001,20 @@ function shiftBlock() {
     return c;
   }
   const rem = shiftRemaining(S.shift.planned_end);
+  const onBreak = S.dutyStatus === 'on_break';
   const c = el(`<div class="card"><div class="row"><div class="stack">
-      <b>On shift${rem ? ` · ${rem.label} left` : ''}</b>
-      <span class="muted small">Ends ${esc(S.shift.planned_end)}</span></div>
+      <b>${onBreak ? '⏸ On break' : `On shift${rem ? ` · ${rem.label} left` : ''}`}</b>
+      <span class="muted small">Ends ${esc(S.shift.planned_end)}${S.shift.break_minutes ? ` · ${S.shift.break_minutes}m break so far` : ''}</span></div>
       <button class="btn ghost sm" id="endsh">End</button></div>
     <div class="btn-row" style="margin-top:12px">
       <button class="btn ${S.dutyStatus === 'available' ? 'ok' : 'secondary'} sm" id="av">● Available</button>
       <button class="btn ${S.dutyStatus === 'going_home' ? '' : 'secondary'} sm" id="gh">⌂ Going home</button>
+      <button class="btn ${onBreak ? '' : 'secondary'} sm" id="brk">${onBreak ? '▶ End break' : '⏸ Break'}</button>
     </div></div>`);
   c.querySelector('#endsh').onclick = endShift;
   c.querySelector('#av').onclick = () => setDuty('available');
   c.querySelector('#gh').onclick = () => setDuty('going_home');
+  c.querySelector('#brk').onclick = () => setDuty(onBreak ? 'available' : 'on_break');
   return c;
 }
 
@@ -958,7 +1047,87 @@ function shiftStartScreen() {
     });
     $('#startbtn').onclick = async () => {
       const r = await mutate('/shift/start', { planned_end: inp.value });
-      if (r.ok || r.queued) { toast('Shift started'); await loadShift(); go('#/home'); } else toast('Could not start shift', true);
+      if (r.ok || r.queued) {
+        toast('Shift started'); await loadShift();
+        // Walkaround before wheels turn (advisory — skippable inside).
+        go(r.ok ? '#/vehicle-check' : '#/home');
+      } else toast('Could not start shift', true);
+    };
+  }, 0);
+  return wrap;
+}
+
+/* ── vehicle inspection checklist (shift start) ── */
+const VEHICLE_CHECK_ITEMS = [
+  ['tyres', 'Tyres', 'Tread, pressure, no visible damage'],
+  ['lights', 'Lights', 'Head/brake/indicators all working'],
+  ['bodywork', 'Bodywork', 'No new damage'],
+  ['load_area', 'Load area', 'Clean, empty, straps present'],
+  ['oil_coolant', 'Oil / coolant', 'Levels OK, no leaks'],
+  ['wipers_washers', 'Wipers / washers', 'Blades OK, washer fluid topped up'],
+];
+function vehicleCheckScreen() {
+  const state = {}; VEHICLE_CHECK_ITEMS.forEach(([k]) => { state[k] = true; });
+  let photoData = null;
+  const wrap = el('<div></div>');
+  wrap.appendChild(el(header('Vehicle check', 'Before you drive')));
+  const main = el(`<main>
+    <div class="card"><p class="muted small" style="margin:0">Quick walkaround. Failing an item never blocks your shift — it flags the defect to ops.</p></div>
+    <label>Odometer (miles)</label>
+    <input id="vc_odo" type="text" inputmode="numeric" placeholder="e.g. 48200" />
+    <div class="section-title">Checklist</div>
+    <div id="vc_items"></div>
+    <label>Defects / notes (if anything failed)</label>
+    <textarea id="vc_defects" placeholder="Describe any defect…"></textarea>
+    <label>Photo (optional)</label>
+    <input id="vc_photo" type="file" accept="image/*" capture="environment" />
+    <img id="vc_prev" class="photo-prev" hidden />
+    <button class="btn ghost" id="vc_skip" style="margin-top:14px">Skip for now</button>
+  </main>`);
+  wrap.appendChild(main);
+  const list = main.querySelector('#vc_items');
+  VEHICLE_CHECK_ITEMS.forEach(([k, label, hint]) => {
+    const row = el(`<div class="card"><div class="row"><div class="stack">
+      <b>${label}</b><span class="muted tiny">${hint}</span></div>
+      <div class="btn-row" style="width:auto">
+        <button class="btn ok sm" data-v="1">Pass</button>
+        <button class="btn secondary sm" data-v="0">Fail</button>
+      </div></div></div>`);
+    const [pass, fail] = row.querySelectorAll('button');
+    const paint = () => {
+      pass.className = 'btn sm ' + (state[k] ? 'ok' : 'secondary');
+      fail.className = 'btn sm ' + (state[k] ? 'secondary' : 'danger');
+    };
+    pass.onclick = () => { state[k] = true; paint(); };
+    fail.onclick = () => { state[k] = false; paint(); };
+    paint();
+    list.appendChild(row);
+  });
+  const bar = el(`<div class="fab-bar"><button class="btn" id="vc_submit">Submit check</button></div>`);
+  wrap.appendChild(bar);
+  setTimeout(() => {
+    $('#vc_photo').onchange = (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      const fr = new FileReader();
+      fr.onload = () => { photoData = fr.result; const p = $('#vc_prev'); p.src = photoData; p.hidden = false; };
+      fr.readAsDataURL(f);
+    };
+    $('#vc_skip').onclick = () => { toast('Vehicle check skipped'); go('#/home'); };
+    $('#vc_submit').onclick = async (e) => {
+      e.target.disabled = true;
+      const r = await mutate('/shift/vehicle-check', {
+        odometer: $('#vc_odo').value.trim(), items: state,
+        defects: $('#vc_defects').value.trim(), photo: photoData,
+      }, { idemKey: uuid() });
+      if (r.ok || r.queued) {
+        const failed = r.ok && r.data.failed_items && r.data.failed_items.length;
+        toast(r.queued ? 'Check queued — will sync' : failed ? '⚠ Defects flagged to ops' : 'Vehicle check logged ✔');
+        go('#/home');
+      } else {
+        e.target.disabled = false;
+        const code = r.data && r.data.error && r.data.error.code;
+        toast(code === 'invalid_odometer' ? 'Check the odometer reading' : 'Could not save the check', true);
+      }
     };
   }, 0);
   return wrap;
@@ -1701,7 +1870,9 @@ async function render() {
   if (route === 'login') view = loginScreen();
   else if (route === 'home') { await Promise.all([loadHome(), loadMessages(), loadOffers()]); view = homeScreen(); }
   else if (route === 'shift-start') view = shiftStartScreen();
+  else if (route === 'vehicle-check') view = vehicleCheckScreen();
   else if (route === 'history') { await loadHistory(); view = historyScreen(); }
+  else if (route === 'history-job') { await loadJob(parts[1]); view = historyJobScreen(); }
   else if (route === 'run') { await Promise.all([loadRun(), loadOffers()]); view = runScreen(); }
   else if (route === 'job') { await loadJob(parts[1]); view = jobScreen(); }
   else if (route === 'scan') { if (!S.job || S.job.docket_number !== parts[1]) await loadJob(parts[1]); view = scanScreen(parts[1], parts[2], parts[3]); }

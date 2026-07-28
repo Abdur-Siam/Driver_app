@@ -716,8 +716,9 @@ def add_message(driver_id, direction, text, category=None, docket=None) -> Dict[
 
 def get_active_shift(driver_id) -> Optional[Dict[str, Any]]:
     r = get_connection().execute(
-        "SELECT id, start_at, planned_end, status FROM shifts "
-        "WHERE driver_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1", (driver_id,),
+        "SELECT id, start_at, planned_end, status, break_started_at, break_minutes "
+        "FROM shifts WHERE driver_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+        (driver_id,),
     ).fetchone()
     return dict(r) if r else None
 
@@ -734,7 +735,10 @@ def last_shift_ended_at(driver_id) -> Optional[str]:
 
 def start_shift(driver_id, planned_end) -> Dict[str, Any]:
     conn = get_connection()
-    # Close any stale active shift first.
+    # Close any stale active shift first (folding in its open break, if any).
+    stale = get_active_shift(driver_id)
+    if stale:
+        _close_open_break(conn, stale)
     conn.execute("UPDATE shifts SET status='ended', ended_at=? WHERE driver_id=? AND status='active'",
                  (_now(), driver_id))
     cur = conn.execute(
@@ -747,25 +751,182 @@ def start_shift(driver_id, planned_end) -> Dict[str, Any]:
     return {"id": cur.lastrowid, "start_at": _now(), "planned_end": planned_end, "status": "active"}
 
 
-def end_shift(driver_id) -> bool:
+def _break_minutes_since(started_at) -> int:
+    from .auth import parse_iso
+    dt = parse_iso(started_at)
+    if not dt:
+        return 0
+    return max(0, int(round((datetime.now(timezone.utc) - dt).total_seconds() / 60.0)))
+
+
+def _close_open_break(conn, shift) -> int:
+    """Fold an open break into the shift's accumulated break_minutes.
+    Returns the minutes added (0 when no break was open)."""
+    if not shift or not shift.get("break_started_at"):
+        return 0
+    mins = _break_minutes_since(shift["break_started_at"])
+    conn.execute(
+        "UPDATE shifts SET break_minutes = COALESCE(break_minutes, 0) + ?, "
+        "break_started_at = NULL WHERE id = ?", (mins, shift["id"]))
+    return mins
+
+
+def end_shift(driver_id) -> Optional[Dict[str, Any]]:
+    """End the active shift (closing any open break first) and return the
+    shift summary — None when there was no active shift."""
     conn = get_connection()
-    cur = conn.execute("UPDATE shifts SET status='ended', ended_at=? WHERE driver_id=? AND status='active'",
-                       (_now(), driver_id))
+    shift = get_active_shift(driver_id)
+    if not shift:
+        conn.execute("UPDATE drivers SET duty_status='off' WHERE driver_id=?", (driver_id,))
+        conn.commit()
+        return None
+    _close_open_break(conn, shift)
+    conn.execute("UPDATE shifts SET status='ended', ended_at=? WHERE id=?",
+                 (_now(), shift["id"]))
     conn.execute("UPDATE drivers SET duty_status='off' WHERE driver_id=?", (driver_id,))
     conn.commit()
-    if cur.rowcount:
-        audit(driver_id, "shift:end")
-    return cur.rowcount > 0
+    audit(driver_id, "shift:end")
+    return shift_summary(driver_id, shift["id"])
+
+
+def _haversine_km(lat1, lng1, lat2, lng2) -> float:
+    from math import asin, cos, radians, sin, sqrt
+    if None in (lat1, lng1, lat2, lng2):
+        return 0.0
+    dlat, dlng = radians(lat2 - lat1), radians(lng2 - lng1)
+    h = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlng / 2) ** 2
+    return 2 * 6371.0 * asin(sqrt(h))
+
+
+def shift_summary(driver_id, shift_id) -> Optional[Dict[str, Any]]:
+    """What the shift added up to: duty/break/worked minutes, jobs completed,
+    drops delivered/failed, GPS distance (honest 0.0 when tracking was off)
+    and the earnings on jobs completed inside the shift window."""
+    from .auth import parse_iso
+    conn = get_connection()
+    s = conn.execute("SELECT * FROM shifts WHERE id = ? AND driver_id = ?",
+                     (shift_id, driver_id)).fetchone()
+    if not s:
+        return None
+    s = dict(s)
+    start, end = s["start_at"], s["ended_at"] or _now()
+    t0, t1 = parse_iso(start), parse_iso(end)
+    duration = max(0, int(round((t1 - t0).total_seconds() / 60.0))) if t0 and t1 else 0
+    breaks = int(s.get("break_minutes") or 0)
+    # Timestamps are "%Y-%m-%dT%H:%M:%SZ" strings — lexicographic == chronological.
+    jobs = conn.execute(
+        "SELECT driver_pay_final FROM jobs WHERE driver_id = ? AND status = 'COMPLETED' "
+        "AND completed_at >= ? AND completed_at <= ?", (driver_id, start, end)).fetchall()
+    earnings = sum(float(j["driver_pay_final"] or 0) for j in jobs)
+    drops = conn.execute(
+        "SELECT d.status FROM drops d JOIN jobs j ON j.docket_number = d.docket_number "
+        "WHERE j.driver_id = ? AND d.pod_at >= ? AND d.pod_at <= ? "
+        "AND d.status IN ('delivered','failed')", (driver_id, start, end)).fetchall()
+    pts = conn.execute(
+        "SELECT lat, lng FROM locations WHERE driver_id = ? "
+        "AND recorded_at >= ? AND recorded_at <= ? ORDER BY id",
+        (driver_id, start, end)).fetchall()
+    km = sum(_haversine_km(a["lat"], a["lng"], b["lat"], b["lng"])
+             for a, b in zip(pts, pts[1:]))
+    return {
+        "shift_id": s["id"], "start_at": start, "ended_at": s["ended_at"],
+        "duration_minutes": duration, "break_minutes": breaks,
+        "worked_minutes": max(0, duration - breaks),
+        "jobs_completed": len(jobs),
+        "drops_delivered": sum(1 for d in drops if d["status"] == "delivered"),
+        "drops_failed": sum(1 for d in drops if d["status"] == "failed"),
+        "distance_km": round(km, 1),
+        "earnings": "%.2f" % (earnings + 1e-9),
+    }
 
 
 def set_duty_status(driver_id, status) -> Dict[str, Any]:
-    if status not in ("available", "going_home", "off"):
+    if status not in ("available", "going_home", "off", "on_break"):
         return {"ok": False, "reason": "invalid_status"}
     conn = get_connection()
+    row = conn.execute("SELECT duty_status FROM drivers WHERE driver_id = ?",
+                       (driver_id,)).fetchone()
+    prev = row["duty_status"] if row else "off"
+    shift = get_active_shift(driver_id)
+    if status == "on_break":
+        # Breaks are shift-time bookkeeping — without a shift there's nothing
+        # to pause, and no row to accumulate the minutes on.
+        if not shift:
+            return {"ok": False, "reason": "no_active_shift"}
+        if not shift.get("break_started_at"):
+            conn.execute("UPDATE shifts SET break_started_at = ? WHERE id = ?",
+                         (_now(), shift["id"]))
+    elif prev == "on_break":
+        _close_open_break(conn, shift)
     conn.execute("UPDATE drivers SET duty_status=? WHERE driver_id=?", (status, driver_id))
     conn.commit()
-    audit(driver_id, "duty:status", detail={"status": status})
+    audit(driver_id, "duty:status", detail={"status": status, "from": prev})
     return {"ok": True, "status": status}
+
+
+# ── Vehicle inspection checklist (shift-start walkaround) ─────────────
+
+VEHICLE_CHECK_ITEMS = ("tyres", "lights", "bodywork", "load_area",
+                       "oil_coolant", "wipers_washers")
+
+
+def save_vehicle_check(driver_id, odometer, items, defects=None,
+                       photo_ref=None) -> Dict[str, Any]:
+    """Record the walkaround for the ACTIVE shift. Advisory by design: a
+    failed item never blocks the shift, but it does flag to ops through the
+    existing message channel (unread badge + thread)."""
+    shift = get_active_shift(driver_id)
+    if not shift:
+        return {"ok": False, "reason": "no_active_shift"}
+    if not isinstance(items, dict):
+        return {"ok": False, "reason": "invalid_items"}
+    clean = {}
+    for k in VEHICLE_CHECK_ITEMS:
+        if k not in items:
+            return {"ok": False, "reason": "invalid_items"}
+        clean[k] = bool(items[k])
+    odo = None
+    if odometer not in (None, ""):
+        try:
+            odo = int(float(odometer))
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "invalid_odometer"}
+        if not (0 <= odo <= 2_000_000):
+            return {"ok": False, "reason": "invalid_odometer"}
+    defects = (str(defects).strip()[:500] or None) if defects else None
+    conn = get_connection()
+    cur = conn.execute(
+        "INSERT INTO vehicle_checks (driver_id, shift_id, odometer, items_json, "
+        "defects, photo_ref, created_at) VALUES (?,?,?,?,?,?,?)",
+        (driver_id, shift["id"], odo, json.dumps(clean), defects, photo_ref, _now()))
+    conn.commit()
+    failed = sorted(k for k, v in clean.items() if not v)
+    audit(driver_id, "vehicle:check",
+          detail={"shift_id": shift["id"], "failed": failed, "odometer": odo})
+    if failed:
+        labels = ", ".join(k.replace("_", " ") for k in failed)
+        add_message(driver_id, "driver",
+                    f"Vehicle check: defect(s) reported — {labels}."
+                    + (f" Note: {defects}" if defects else ""),
+                    "vehicle_check")
+    return {"ok": True, "id": cur.lastrowid, "shift_id": shift["id"],
+            "failed_items": failed}
+
+
+def latest_vehicle_check(driver_id, shift_id=None) -> Optional[Dict[str, Any]]:
+    if shift_id is None:
+        shift = get_active_shift(driver_id)
+        if not shift:
+            return None
+        shift_id = shift["id"]
+    row = get_connection().execute(
+        "SELECT * FROM vehicle_checks WHERE driver_id = ? AND shift_id = ? "
+        "ORDER BY id DESC LIMIT 1", (driver_id, shift_id)).fetchone()
+    if not row:
+        return None
+    v = dict(row)
+    v["items"] = json.loads(v.pop("items_json") or "{}")
+    return v
 
 
 # ── Job history ──────────────────────────────────────────────────────

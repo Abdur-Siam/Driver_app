@@ -530,6 +530,7 @@ def shift_get():
     drv = store.get_profile(g.driver_id) or {}
     return jsonify({"shift": store.get_active_shift(g.driver_id),
                     "duty_status": drv.get("duty_status", "off"),
+                    "vehicle_check": store.latest_vehicle_check(g.driver_id),
                     "now": store._now()})
 
 
@@ -546,8 +547,30 @@ def shift_start():
 @api.route("/shift/end", methods=["POST"])
 @require_token
 def shift_end():
-    store.end_shift(g.driver_id)
-    return jsonify({"success": True})
+    """Ends the shift and returns its summary (None when no shift was open)."""
+    summary = store.end_shift(g.driver_id)
+    return jsonify({"success": True, "summary": summary})
+
+
+@api.route("/shift/vehicle-check", methods=["POST"])
+@require_token
+@rate_limited
+def shift_vehicle_check():
+    """Shift-start walkaround: odometer + pass/fail per checklist item.
+    Defects are advisory — they flag to ops but never block the shift."""
+    body = request.get_json(silent=True) or {}
+    photo = _save_data_url(body.get("photo"), "vcheck")
+    r = store.save_vehicle_check(g.driver_id, body.get("odometer"),
+                                 body.get("items"), body.get("defects"), photo)
+    if not r["ok"]:
+        reason = r["reason"]
+        if reason == "no_active_shift":
+            return _err("no_active_shift", "Start your shift first", 409)
+        if reason == "invalid_odometer":
+            return _err("invalid_odometer", "Enter a valid odometer reading", 400)
+        return _err("invalid_items",
+                    "Every checklist item needs a pass/fail answer", 400)
+    return jsonify({"success": True, **r})
 
 
 @api.route("/status", methods=["POST"])
@@ -556,6 +579,8 @@ def duty_status():
     body = request.get_json(silent=True) or {}
     r = store.set_duty_status(g.driver_id, (body.get("status") or "").strip())
     if not r["ok"]:
+        if r["reason"] == "no_active_shift":
+            return _err("no_active_shift", "Start a shift before taking a break", 409)
         return _err("invalid_status", "Unknown status", 400)
     return jsonify({"success": True, **r})
 
