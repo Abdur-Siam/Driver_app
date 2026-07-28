@@ -1321,3 +1321,11 @@ def test_history_job_detail_returns_pod_for_reaccess(client):
     assert pod["signature"].startswith("/media/") and "sig=" in pod["signature"]
     assert pod["photos"] and all("sig=" in p for p in pod["photos"])
     assert pod["lat"] == 51.53 and pod["lng"] == -0.12
+
+
+def test_text_size_persists_like_theme(client):
+    h = _auth(client)
+    assert client.get("/api/driver/v1/profile", headers=h).get_json()["profile"]["text_size"] == "normal"
+    r = client.post("/api/driver/v1/profile", json={"fields": {"text_size": "large"}}, headers=h)
+    assert r.status_code == 200 and "text_size" in r.get_json()["updated"]
+    assert client.get("/api/driver/v1/profile", headers=h).get_json()["profile"]["text_size"] == "large"

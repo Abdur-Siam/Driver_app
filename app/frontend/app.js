@@ -31,6 +31,7 @@ const S = {
 
 const LS_THEME = 'tom_driver_theme';
 const LS_SOUND = 'tom_driver_sound_conn';
+const LS_TEXTSIZE = 'tom_driver_textsize';
 
 /* ── utils ── */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -178,6 +179,7 @@ async function loadStatements() { try { const r = await api('/statements'); if (
 async function loadStatement(sid) { try { const r = await api('/statements/' + sid); S.statement = r.ok ? r.data.statement : null; } catch (e) { S.statement = null; } }
 async function loadProfile() { try { const r = await api('/profile'); if (r.ok) { S.profile = r.data.profile; S.pending = r.data.pending;
   if (r.data.profile.theme) applyTheme(r.data.profile.theme);
+  if (r.data.profile.text_size) applyTextSize(r.data.profile.text_size);
   localStorage.setItem(LS_SOUND, r.data.profile.sound_alert_conn ? '1' : '0'); } } catch (e) {} }
 async function loadExpenses() { try { const r = await api('/expenses'); if (r.ok) S.expenses = r.data.expenses; } catch (e) {} }
 async function loadTax() { try { const r = await api('/tax'); if (r.ok) S.tax = r.data; } catch (e) {} }
@@ -206,6 +208,14 @@ function applyTheme(theme) {
   if (theme === 'auto') resolved = window.matchMedia('(prefers-color-scheme: light)').matches ? 'day' : 'night';
   document.documentElement.dataset.theme = resolved;
   localStorage.setItem(LS_THEME, theme);
+}
+
+/* ── text size (accessibility) — persisted like the theme ── */
+function applyTextSize(size) {
+  size = size || localStorage.getItem(LS_TEXTSIZE) || 'normal';
+  if (!['normal', 'large', 'extra'].includes(size)) size = 'normal';
+  document.documentElement.dataset.textsize = size;
+  localStorage.setItem(LS_TEXTSIZE, size);
 }
 
 /* ── connection-lost alert ── */
@@ -421,10 +431,42 @@ function mountMap() {
 }
 function drawMap() {
   if (!window.google || !$('#map')) return;
-  const pts = S.run.filter(j => j.pickup.lat).map(j => ({ lat: j.pickup.lat, lng: j.pickup.lng }));
-  const center = pts[0] || { lat: 51.5237, lng: -0.1075 };
-  const map = new google.maps.Map($('#map'), { center, zoom: 12, disableDefaultUI: true });
-  pts.forEach((p, i) => new google.maps.Marker({ position: p, map, label: String(i + 1) }));
+  const center = (S.run.find(_hasCoords) || { pickup: DEFAULT_ORIGIN }).pickup;
+  const map = new google.maps.Map($('#map'), {
+    center: { lat: center.lat, lng: center.lng }, zoom: 12, disableDefaultUI: true,
+  });
+  const bounds = new google.maps.LatLngBounds();
+  let plotted = 0;
+  // Numbered pickup pins (run order).
+  S.run.forEach((j, i) => {
+    if (!_hasCoords(j)) return;
+    const p = { lat: j.pickup.lat, lng: j.pickup.lng };
+    new google.maps.Marker({ position: p, map, label: String(i + 1),
+      title: `Pickup ${i + 1} · ${j.docket_number}` });
+    bounds.extend(p); plotted++;
+  });
+  // Drop pins — amber circles. Vector symbols, so no external icon fetch
+  // (keeps the CSP allow-list untouched).
+  S.run.forEach(j => (j.drops || []).forEach(d => {
+    if (d.lat == null || d.lng == null) return;
+    const p = { lat: d.lat, lng: d.lng };
+    new google.maps.Marker({ position: p, map,
+      icon: { path: google.maps.SymbolPath.CIRCLE, scale: 7, fillColor: '#E0A200',
+              fillOpacity: 1, strokeColor: '#0b1420', strokeWeight: 1.5 },
+      title: `Drop ${d.seq} · ${j.docket_number}` });
+    bounds.extend(p); plotted++;
+  }));
+  // Driver marker from the last known position (blue dot, on top).
+  if (S.lastPos) {
+    new google.maps.Marker({ position: S.lastPos, map, zIndex: 999,
+      icon: { path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#4D9EF5',
+              fillOpacity: 1, strokeColor: '#ffffff', strokeWeight: 2 },
+      title: 'You' });
+    bounds.extend(S.lastPos); plotted++;
+  }
+  if (plotted > 1) map.fitBounds(bounds, 36);
+  // No route polyline by design: drawing real roads would need Directions API
+  // calls per render — the pins + numbered order carry the information.
 }
 
 /* ── on-device route fallback + ETAs (consumer / edge model) ──
@@ -1542,6 +1584,16 @@ function notificationsScreen() {
     themeRow.appendChild(b);
   });
   main.appendChild(themeRow);
+  // Text size (accessibility) — applied instantly, synced to the profile.
+  main.appendChild(el(`<div class="section-title">Text size</div>`));
+  const sizeRow = el(`<div class="btn-row"></div>`);
+  [['normal', 'Normal'], ['large', 'Large'], ['extra', 'Extra']].forEach(([sz, lbl]) => {
+    const cur = (p.text_size || localStorage.getItem(LS_TEXTSIZE) || 'normal') === sz;
+    const b = el(`<button class="btn ${cur ? '' : 'secondary'} sm">${lbl}</button>`);
+    b.onclick = async () => { applyTextSize(sz); await mutate('/profile', { fields: { text_size: sz } }); await loadProfile(); render(); };
+    sizeRow.appendChild(b);
+  });
+  main.appendChild(sizeRow);
   // Map app
   main.appendChild(el(`<div class="section-title">Navigation app</div>
     <select id="navapp" style="${sel}">
@@ -1978,7 +2030,8 @@ async function registerPush() {
 
 /* ── boot ── */
 (async function boot() {
-  applyTheme();   // instant theme from localStorage before anything renders
+  applyTheme();      // instant theme from localStorage before anything renders
+  applyTextSize();   // instant text size too (same persistence model)
   document.documentElement.dataset.platform = platform();
   if (isStandalone()) document.documentElement.dataset.standalone = '1';
   if (window.TOMNative && window.TOMNative.init) { try { await window.TOMNative.init({ onPush: () => { loadMessages(); if (location.hash.startsWith('#/messages') || location.hash.startsWith('#/home')) render(); } }); } catch (e) {} }

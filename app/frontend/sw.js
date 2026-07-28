@@ -2,7 +2,7 @@
    The shell (HTML/CSS/JS/icon) is cached so the app launches with no
    signal; API calls are always network (never cached) — offline writes
    go through the app's own outbox, not the SW. */
-const CACHE = 'tom-driver-v8';
+const CACHE = 'tom-driver-v9';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/config.js', '/native-bridge.js', '/icon.svg', '/manifest.webmanifest',
   '/icons/icon-192.png', '/icons/icon-512.png', '/icons/apple-touch-icon.png'];
 

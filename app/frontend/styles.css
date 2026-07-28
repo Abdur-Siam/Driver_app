@@ -5,6 +5,13 @@
   --radius: 14px; --pad: 16px; --tap: 52px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
 }
+/* Text-size setting (Me → App & display): the readable text below is rem-
+   based, so scaling the root font-size scales body/card/button text without
+   touching layout dimensions. */
+html { font-size: 16px; }
+html[data-textsize="large"] { font-size: 18px; }
+html[data-textsize="extra"] { font-size: 20px; }
+
 :root[data-theme="day"] {
   --bg:#F4F6FA; --surface:#fff; --surface2:#eef2f8; --line:#dbe3ef;
   --text:#16233a; --muted:#5a6b86; --on-accent:#fff;
@@ -13,7 +20,7 @@
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   /* Stop iOS Safari inflating font sizes; kill rubber-band/pull-to-refresh. */
   -webkit-text-size-adjust: 100%; text-size-adjust: 100%; overscroll-behavior: none; }
-body { font-size: 17px; line-height: 1.45;
+body { font-size: 1.0625rem; line-height: 1.45;
   /* Disable the iOS long-press callout / forced text selection on app chrome. */
   -webkit-touch-callout: none; }
 /* Inputs and content must stay selectable even though the chrome isn't. */
@@ -27,13 +34,13 @@ input, textarea, .selectable { -webkit-user-select: text; user-select: text; }
 .hdr { position: sticky; top: 0; z-index: 5; background: var(--accent-d); color: #fff;
   padding: calc(env(safe-area-inset-top, 0px) + 12px) var(--pad) 12px; }
 .hdr-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.hdr h1 { font-size: 18px; margin: 0; font-weight: 600; }
+.hdr h1 { font-size: 1.125rem; margin: 0; font-weight: 600; }
 .hdr-back { flex: none; width: 34px; height: 34px; border-radius: 50%; border: 0;
   background: rgba(255,255,255,.16); color: #fff; font-size: 26px; line-height: 1;
   display: grid; place-items: center; padding: 0 0 3px; cursor: pointer; }
 .hdr-back:active { background: rgba(255,255,255,.28); }
-.hdr .sub { font-size: 13px; opacity: .85; }
-.chip { font-size: 12px; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,.18);
+.hdr .sub { font-size: 0.8125rem; opacity: .85; }
+.chip { font-size: 0.75rem; padding: 4px 10px; border-radius: 20px; background: rgba(255,255,255,.18);
   display: inline-flex; align-items: center; gap: 6px; }
 .chip.ok { background: rgba(46,212,122,.22); }
 .chip.warn { background: rgba(224,162,0,.25); }
@@ -42,20 +49,20 @@ input, textarea, .selectable { -webkit-user-select: text; user-select: text; }
 
 /* ── layout ── */
 main { flex: 1; padding: var(--pad); padding-bottom: 96px; }
-.section-title { font-size: 13px; text-transform: uppercase; letter-spacing: .05em;
+.section-title { font-size: 0.8125rem; text-transform: uppercase; letter-spacing: .05em;
   color: var(--muted); margin: 18px 2px 8px; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 14px; margin-bottom: 12px; }
 .card.tap { cursor: pointer; transition: transform .08s; }
 .card.tap:active { transform: scale(.99); }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.muted { color: var(--muted); } .small { font-size: 13px; } .tiny { font-size: 12px; }
+.muted { color: var(--muted); } .small { font-size: 0.8125rem; } .tiny { font-size: 0.75rem; }
 .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 .stack { display: flex; flex-direction: column; gap: 4px; }
 .spacer { height: 8px; }
 
 /* ── pills / status ── */
-.pill { font-size: 12px; padding: 3px 10px; border-radius: 20px; font-weight: 600; white-space: nowrap; }
+.pill { font-size: 0.75rem; padding: 3px 10px; border-radius: 20px; font-weight: 600; white-space: nowrap; }
 .pill.green { background: rgba(46,212,122,.18); color: var(--ok); }
 .pill.amber { background: rgba(224,162,0,.20); color: var(--warn); }
 .pill.red { background: rgba(255,90,90,.18); color: var(--danger); }
@@ -68,14 +75,14 @@ main { flex: 1; padding: var(--pad); padding-bottom: 96px; }
 button { font: inherit; }
 .btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
   min-height: var(--tap); border: 0; border-radius: var(--radius); background: var(--accent);
-  color: var(--on-accent); font-weight: 700; font-size: 17px; padding: 0 16px; }
+  color: var(--on-accent); font-weight: 700; font-size: 1.0625rem; padding: 0 16px; }
 .btn:active { filter: brightness(.94); }
 .btn.secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--line); }
 .btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
 .btn.danger { background: var(--danger); color: #fff; }
 .btn.ok { background: var(--ok); color: #06321c; }
 .btn:disabled { opacity: .5; }
-.btn.sm { min-height: 40px; font-size: 15px; width: auto; padding: 0 14px; }
+.btn.sm { min-height: 40px; font-size: 0.9375rem; width: auto; padding: 0 14px; }
 .btn-row { display: flex; gap: 10px; }
 .fab-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; max-width: 520px; margin: 0 auto;
   padding: 10px var(--pad) calc(env(safe-area-inset-bottom, 0px) + 12px);
@@ -85,7 +92,7 @@ button { font: inherit; }
 .nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; max-width: 520px; margin: 0 auto;
   display: flex; background: var(--surface); border-top: 1px solid var(--line);
   padding-bottom: env(safe-area-inset-bottom, 0px); }
-.nav a { flex: 1; text-align: center; padding: 10px 0 12px; color: var(--muted); font-size: 11px;
+.nav a { flex: 1; text-align: center; padding: 10px 0 12px; color: var(--muted); font-size: 0.6875rem;
   text-decoration: none; display: flex; flex-direction: column; align-items: center; gap: 3px; }
 .nav a.active { color: var(--accent); }
 .nav .ico { font-size: 20px; line-height: 1; }
@@ -93,7 +100,7 @@ button { font: inherit; }
   padding: 0 5px; margin-left: 4px; }
 
 /* ── forms ── */
-label { font-size: 13px; color: var(--muted); display: block; margin: 12px 2px 6px; }
+label { font-size: 0.8125rem; color: var(--muted); display: block; margin: 12px 2px 6px; }
 input[type=text], input[type=password], input[type=search], textarea {
   width: 100%; min-height: var(--tap); background: var(--surface2); border: 1px solid var(--line);
   border-radius: var(--radius); color: var(--text); padding: 12px 14px; font: inherit; }
@@ -132,7 +139,7 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); }
 
 /* ── toast ── */
 .toast { position: fixed; left: 50%; bottom: 86px; transform: translateX(-50%); z-index: 20;
-  background: #000d; color: #fff; padding: 10px 16px; border-radius: 20px; font-size: 14px;
+  background: #000d; color: #fff; padding: 10px 16px; border-radius: 20px; font-size: 0.875rem;
   max-width: 90%; }
 .toast.err { background: var(--danger); }
 
@@ -176,5 +183,5 @@ input:focus, textarea:focus { outline: 2px solid var(--accent); }
 .empty .big { font-size: 40px; margin-bottom: 8px; }
 .link { color: var(--accent); text-decoration: none; }
 .divider { height: 1px; background: var(--line); margin: 12px 0; }
-.kv { display: flex; justify-content: space-between; padding: 6px 0; font-size: 15px; }
+.kv { display: flex; justify-content: space-between; padding: 6px 0; font-size: 0.9375rem; }
 .kv .k { color: var(--muted); }

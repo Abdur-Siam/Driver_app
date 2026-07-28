@@ -950,14 +950,14 @@ _PROFILE_FIELDS = (
     "bank_sort_code", "bank_account_number", "bank_account_name", "bank_status",
     "rating", "acceptance_pct", "completion_pct", "on_time_pct",
     "notify_jobs", "notify_pay", "notify_msgs", "nav_app",
-    "duty_status", "theme", "sound_alert_conn", "biometric", "location_consent_at",
+    "duty_status", "theme", "text_size", "sound_alert_conn", "biometric", "location_consent_at",
     "avatar_url", "vehicle_photo_url",
 )
 # Fields a driver can change live; everything sensitive goes via review.
 _DIRECT_EDIT = {"phone", "email", "address", "emergency_name", "emergency_phone",
                 "vehicle_reg", "vehicle_make", "vehicle_model",
                 "notify_jobs", "notify_pay", "notify_msgs", "nav_app",
-                "theme", "sound_alert_conn", "biometric"}
+                "theme", "text_size", "sound_alert_conn", "biometric"}
 _SENSITIVE_EDIT = {"bank_sort_code", "bank_account_number", "bank_account_name",
                    "vat_number", "vat_registered", "utr_or_company_ref"}
 
