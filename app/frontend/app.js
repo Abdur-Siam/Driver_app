@@ -484,23 +484,36 @@ function timeline(j) {
     `<div class="seg ${i < cur ? 'done' : i === cur - 1 ? 'cur' : ''}"></div>`).join('') + '</div>';
 }
 
+async function arriveAtDrop(docket, seq) {
+  const pos = await currentPos().catch(() => null);
+  const r = await mutate(`/jobs/${docket}/drops/${seq}/arrive`,
+    { lat: pos && pos.lat, lng: pos && pos.lng }, { idemKey: uuid() });
+  if (r.ok || r.queued) { toast(r.queued ? 'Arrival queued' : 'Arrival logged'); await loadJob(docket); render(); }
+  else toast('Could not log arrival', true);
+}
+
 function dropCard(j, d) {
   const can = ['pob', 'en_route_drop'].includes(j.lifecycle_status);
   const statusPill = d.status === 'delivered' ? '<span class="pill green">Delivered</span>'
-    : d.status === 'failed' ? '<span class="pill red">Failed</span>' : '<span class="pill grey">Pending</span>';
+    : d.status === 'failed' ? '<span class="pill red">Failed</span>'
+    : d.status === 'arrived' ? '<span class="pill amber">Arrived</span>' : '<span class="pill grey">Pending</span>';
   const c = el(`<div class="card"><div class="row"><div class="stack">
       <div style="font-weight:700">${d.seq}. ${esc(d.address || d.postcode || '')}</div>
       <div class="muted small">${esc(d.postcode || '')}${d.contact ? ' · ' + esc(d.contact) : ''}</div>
       ${d.instructions ? `<div class="tiny muted">${esc(d.instructions)}</div>` : ''}
       <div class="tiny muted">${d.parcels.length} parcel${d.parcels.length !== 1 ? 's' : ''}</div>
     </div>${statusPill}</div></div>`);
-  if (can && d.status === 'pending') {
+  if (can && (d.status === 'pending' || d.status === 'arrived')) {
     const allScanned = d.parcels.every(p => p.state === 'delivered');
     const row = el(`<div class="btn-row" style="margin-top:12px"></div>`);
     const navb = el(`<button class="btn ghost sm">🧭 Navigate</button>`); navb.onclick = () => navTo(enc(d));
     row.appendChild(navb);
-    // Scan gate applies only to scan-required jobs; others go straight to POD.
-    if (j.requires_scan && !allScanned) {
+    if (d.status === 'pending') {
+      // Arrival first — the POD flow opens once the driver is at the door.
+      const ar = el(`<button class="btn sm">📍 Arrived</button>`);
+      ar.onclick = () => arriveAtDrop(j.docket_number, d.seq); row.appendChild(ar);
+    } else if (j.requires_scan && !allScanned) {
+      // Scan gate applies only to scan-required jobs; others go straight to POD.
       const sc = el(`<button class="btn sm">📷 Scan & deliver</button>`);
       sc.onclick = () => go(`#/scan/${j.docket_number}/deliver/${d.seq}`); row.appendChild(sc);
     } else {

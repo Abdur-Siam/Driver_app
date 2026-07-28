@@ -179,6 +179,7 @@ def _project_job(job: Dict[str, Any], full: bool = False) -> Dict[str, Any]:
                 "seq": d["seq"], "address": d["address"], "postcode": d["postcode"],
                 "lat": d["lat"], "lng": d["lng"], "contact": d["contact"],
                 "instructions": d["instructions"], "status": d["status"],
+                "arrived_at": d.get("arrived_at"),
                 "parcels": [
                     {"barcode": p["barcode"], "description": p["description"], "state": p["state"]}
                     for p in parcels if p["drop_seq"] == d["seq"]
@@ -188,15 +189,23 @@ def _project_job(job: Dict[str, Any], full: bool = False) -> Dict[str, Any]:
         ],
     }
     if full:
-        out["pod"] = [
-            {"seq": d["seq"], "recipient": d["pod_recipient"], "at": d["pod_at"],
-             "signature": d["pod_signature"], "photo": d["pod_photo"],
-             "photos": json.loads(d["pod_photos"]) if d.get("pod_photos") else (
-                 [d["pod_photo"]] if d["pod_photo"] else []),
-             "note": d["pod_note"], "fail_reason": d["fail_reason"]}
-            for d in drops if d["status"] in ("delivered", "failed")
-        ]
+        out["pod"] = [_pod_entry(d) for d in drops if d["status"] in ("delivered", "failed")]
     return out
+
+
+def _pod_entry(d: Dict[str, Any]) -> Dict[str, Any]:
+    # Failure photos live in fail_photo; rows written before that column
+    # existed misfiled them in pod_photo — fall back so old rows stay readable.
+    photo = ((d.get("fail_photo") or d["pod_photo"]) if d["status"] == "failed"
+             else d["pod_photo"])
+    return {
+        "seq": d["seq"], "recipient": d["pod_recipient"], "at": d["pod_at"],
+        "signature": d["pod_signature"], "photo": photo,
+        "photos": json.loads(d["pod_photos"]) if d.get("pod_photos") else (
+            [photo] if photo else []),
+        "note": d["pod_note"], "fail_reason": d["fail_reason"],
+        "lat": d.get("pod_lat"), "lng": d.get("pod_lng"),
+    }
 
 
 def list_run(driver_id, date=None) -> List[Dict[str, Any]]:
@@ -376,11 +385,16 @@ def capture_pod(docket, driver_id, drop_seq, recipient, signature_ref,
                        if int(p["drop_seq"]) == int(drop_seq) and p["state"] != "delivered"]
         if outstanding:
             return {"ok": False, "reason": "parcels_outstanding"}
+    # Persist where the POD was captured (validated — junk coords store NULL,
+    # never a fake position on a legal proof-of-delivery record).
+    pod_lat, pod_lng = _coord(lat, -90, 90), _coord(lng, -180, 180)
+    if pod_lat is None or pod_lng is None:
+        pod_lat = pod_lng = None
     conn.execute(
         "UPDATE drops SET status='delivered', pod_recipient=?, pod_signature=?, "
-        "pod_photo=?, pod_photos=?, pod_note=?, pod_at=? WHERE id=?",
+        "pod_photo=?, pod_photos=?, pod_note=?, pod_at=?, pod_lat=?, pod_lng=? WHERE id=?",
         (recipient, signature_ref, photo_ref, json.dumps(photos) if photos else None,
-         note, _now(), row["id"]),
+         note, _now(), pod_lat, pod_lng, row["id"]),
     )
     conn.commit()
     audit(driver_id, "pod", docket, {"drop_seq": drop_seq, "recipient": recipient})
@@ -400,8 +414,10 @@ def fail_drop(docket, driver_id, drop_seq, reason, note=None, photo_ref=None) ->
         return {"ok": False, "reason": "drop_not_found"}
     if row["status"] in ("delivered", "failed"):
         return {"ok": False, "reason": "already_resolved"}
+    # The failure photo has its own column (fail_photo). Rows written before it
+    # existed carry the photo in pod_photo — readers fall back (see _project_job).
     conn.execute(
-        "UPDATE drops SET status='failed', fail_reason=?, fail_note=?, pod_photo=?, "
+        "UPDATE drops SET status='failed', fail_reason=?, fail_note=?, fail_photo=?, "
         "pod_at=? WHERE id=?",
         (reason, note, photo_ref, _now(), row["id"]),
     )
@@ -409,6 +425,38 @@ def fail_drop(docket, driver_id, drop_seq, reason, note=None, photo_ref=None) ->
     audit(driver_id, "fail", docket, {"drop_seq": drop_seq, "reason": reason})
     completed = _maybe_complete_job(docket, driver_id)
     return {"ok": True, "drop_seq": drop_seq, "job_completed": completed}
+
+
+def arrive_at_drop(docket, driver_id, drop_seq, lat=None, lng=None) -> Dict[str, Any]:
+    """Mark the driver arrived at a drop (pending → arrived). Arrival is an
+    optional waypoint before the POD/failure flow: an 'arrived' drop is NOT
+    resolved, so _maybe_complete_job semantics are untouched. Ordering is
+    enforced — the job must be loaded (pob / en_route_drop) and the drop
+    still unresolved. POD directly from 'pending' stays allowed (offline
+    outboxes may replay out of order; arrival must never wedge a delivery)."""
+    job = _job_row(docket, driver_id)
+    if not job:
+        return {"ok": False, "reason": "not_found"}
+    if job["status"] in ("COMPLETED", "CANCELLED"):
+        return {"ok": False, "reason": "invalid_state"}
+    if (job["lifecycle_status"] or "assigned") not in ("pob", "en_route_drop"):
+        return {"ok": False, "reason": "invalid_state"}
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM drops WHERE docket_number = ? AND seq = ?", (docket, drop_seq),
+    ).fetchone()
+    if not row:
+        return {"ok": False, "reason": "drop_not_found"}
+    if row["status"] in ("delivered", "failed"):
+        return {"ok": False, "reason": "already_resolved"}
+    if row["status"] == "arrived":
+        return {"ok": False, "reason": "already_arrived"}
+    ts = _now()
+    conn.execute("UPDATE drops SET status='arrived', arrived_at=? WHERE id=?", (ts, row["id"]))
+    conn.commit()
+    audit(driver_id, "drop:arrived", docket,
+          {"drop_seq": drop_seq, "lat": _coord(lat, -90, 90), "lng": _coord(lng, -180, 180)})
+    return {"ok": True, "drop_seq": drop_seq, "arrived_at": ts}
 
 
 # ── Location ─────────────────────────────────────────────────────────
@@ -491,8 +539,14 @@ def media_owner(name: str) -> Optional[str]:
     r = conn.execute(
         "SELECT j.driver_id AS driver_id FROM drops d "
         "JOIN jobs j ON j.docket_number = d.docket_number "
-        "WHERE d.pod_signature = ? OR d.pod_photo = ? OR d.pod_photos LIKE ? LIMIT 1",
-        (ref, ref, '%"' + ref + '"%'),
+        "WHERE d.pod_signature = ? OR d.pod_photo = ? OR d.fail_photo = ? "
+        "OR d.pod_photos LIKE ? LIMIT 1",
+        (ref, ref, ref, '%"' + ref + '"%'),
+    ).fetchone()
+    if r:
+        return r["driver_id"]
+    r = conn.execute(
+        "SELECT driver_id FROM vehicle_checks WHERE photo_ref = ? LIMIT 1", (ref,),
     ).fetchone()
     return r["driver_id"] if r else None
 

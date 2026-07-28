@@ -1047,3 +1047,125 @@ def test_run_date_filter(client):
     assert client.get("/api/driver/v1/run?date=1999-01-01", headers=h).get_json()["jobs"] == []
     # Non-ISO values ('today', junk) keep the historic no-filter behaviour.
     assert len(client.get("/api/driver/v1/run?date=today", headers=h).get_json()["jobs"]) == 2
+
+
+# ── POD GPS + arrived-at-drop + failure photo (commercial wave) ───────
+
+def _drive_to_pob(client, h, d="XM-20260626-0051", barcodes=("XM00510101",)):
+    """Take a seeded job through acknowledge → … → pob."""
+    for action in ("acknowledge", "en_route_pickup", "arrive_pickup"):
+        client.post(f"/api/driver/v1/jobs/{d}/status", json={"action": action}, headers=h)
+    for bc in barcodes:
+        client.post(f"/api/driver/v1/jobs/{d}/scan", json={"phase": "collect", "barcode": bc}, headers=h)
+    r = client.post(f"/api/driver/v1/jobs/{d}/status", json={"action": "collected"}, headers=h)
+    assert r.status_code == 200, r.data
+    return d
+
+
+def test_pod_persists_gps_coordinates(client):
+    h = _auth(client)
+    d = _drive_to_pob(client, h)
+    r = client.post(f"/api/driver/v1/jobs/{d}/pod",
+                    json={"drop_seq": 1, "recipient_name": "Mailroom",
+                          "lat": 51.532, "lng": -0.119}, headers=h)
+    assert r.status_code == 200
+    pod = client.get(f"/api/driver/v1/jobs/{d}", headers=h).get_json()["job"]["pod"]
+    assert pod[0]["lat"] == 51.532 and pod[0]["lng"] == -0.119
+
+
+def test_pod_junk_gps_stored_as_null(client):
+    h = _auth(client)
+    d = _drive_to_pob(client, h)
+    r = client.post(f"/api/driver/v1/jobs/{d}/pod",
+                    json={"drop_seq": 1, "recipient_name": "Mailroom",
+                          "lat": "nonsense", "lng": 999}, headers=h)
+    assert r.status_code == 200
+    pod = client.get(f"/api/driver/v1/jobs/{d}", headers=h).get_json()["job"]["pod"]
+    assert pod[0]["lat"] is None and pod[0]["lng"] is None
+
+
+def test_arrive_at_drop_then_pod(client):
+    h = _auth(client)
+    d = _drive_to_pob(client, h)
+    r = client.post(f"/api/driver/v1/jobs/{d}/drops/1/arrive",
+                    json={"lat": 51.53, "lng": -0.12}, headers=h)
+    assert r.status_code == 200 and r.get_json()["arrived_at"]
+    job = client.get(f"/api/driver/v1/jobs/{d}", headers=h).get_json()["job"]
+    assert job["drops"][0]["status"] == "arrived"
+    assert job["drops"][0]["arrived_at"]
+    # An arrived drop is NOT resolved: job stays active and on the run.
+    assert job["status"] == "IN PROGRESS"
+    runs = client.get("/api/driver/v1/run", headers=h).get_json()["jobs"]
+    assert d in {j["docket_number"] for j in runs}
+    # POD from arrived completes the (single-drop) job as normal.
+    pr = client.post(f"/api/driver/v1/jobs/{d}/pod",
+                     json={"drop_seq": 1, "recipient_name": "Mailroom"}, headers=h)
+    assert pr.status_code == 200 and pr.get_json()["job_completed"] is True
+
+
+def test_arrive_requires_loaded_job(client):
+    h = _auth(client)
+    # Job still 'assigned' — not loaded, so arrival is out of order.
+    r = client.post("/api/driver/v1/jobs/XM-20260626-0051/drops/1/arrive", json={}, headers=h)
+    assert r.status_code == 409 and r.get_json()["error"]["code"] == "invalid_state"
+
+
+def test_arrive_conflicts(client):
+    h = _auth(client)
+    # Two-drop job: resolving drop 1 leaves the JOB open, isolating the
+    # drop-level conflict answers from the job-closed guard.
+    d = _drive_to_pob(client, h, d="XM-20260626-0042",
+                      barcodes=("XM00420101", "XM00420201", "XM00420202"))
+    assert client.post(f"/api/driver/v1/jobs/{d}/drops/1/arrive", json={}, headers=h).status_code == 200
+    # Double arrival → conflict.
+    r = client.post(f"/api/driver/v1/jobs/{d}/drops/1/arrive", json={}, headers=h)
+    assert r.status_code == 409 and r.get_json()["error"]["code"] == "already_arrived"
+    # After resolution → conflict too (deliver-scan drop 1's parcel, then POD it).
+    client.post(f"/api/driver/v1/jobs/{d}/scan",
+                json={"phase": "deliver", "drop_seq": 1, "barcode": "XM00420101"}, headers=h)
+    pr = client.post(f"/api/driver/v1/jobs/{d}/pod",
+                     json={"drop_seq": 1, "recipient_name": "M"}, headers=h)
+    assert pr.status_code == 200 and pr.get_json()["job_completed"] is False
+    r2 = client.post(f"/api/driver/v1/jobs/{d}/drops/1/arrive", json={}, headers=h)
+    assert r2.status_code == 409 and r2.get_json()["error"]["code"] == "already_resolved"
+    # A closed job refuses arrival outright.
+    assert client.post(f"/api/driver/v1/jobs/{d}/drops/2/arrive", json={}, headers=h).status_code == 200
+    # Unknown drop and unowned job stay 404.
+    assert client.post(f"/api/driver/v1/jobs/{d}/drops/9/arrive", json={}, headers=h).status_code == 404
+    h2 = _auth(client, "CX014")
+    assert client.post(f"/api/driver/v1/jobs/{d}/drops/1/arrive", json={}, headers=h2).status_code == 404
+
+
+def test_fail_photo_lands_in_fail_photo_column(client):
+    h = _auth(client)
+    d = _drive_to_pob(client, h)
+    png = ("data:image/png;base64,"
+           "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    r = client.post(f"/api/driver/v1/jobs/{d}/fail",
+                    json={"drop_seq": 1, "reason_code": "no_access", "photo": png}, headers=h)
+    assert r.status_code == 200
+    from backend.db import get_connection
+    row = get_connection().execute(
+        "SELECT fail_photo, pod_photo FROM drops WHERE docket_number = ? AND seq = 1", (d,),
+    ).fetchone()
+    assert row["fail_photo"] and row["fail_photo"].startswith("media/")
+    assert row["pod_photo"] is None            # no longer misfiled
+    pod = client.get(f"/api/driver/v1/jobs/{d}", headers=h).get_json()["job"]["pod"]
+    assert pod[0]["fail_reason"] == "no_access"
+    assert pod[0]["photo"] and "/media/" in pod[0]["photo"] and "sig=" in pod[0]["photo"]
+
+
+def test_legacy_fail_photo_in_pod_photo_still_readable(client):
+    h = _auth(client)
+    d = _drive_to_pob(client, h)
+    r = client.post(f"/api/driver/v1/jobs/{d}/fail",
+                    json={"drop_seq": 1, "reason_code": "refused"}, headers=h)
+    assert r.status_code == 200
+    # Simulate a pre-migration row: failure photo sitting in pod_photo.
+    from backend.db import get_connection
+    conn = get_connection()
+    conn.execute("UPDATE drops SET pod_photo = 'media/legacy_fail.png', fail_photo = NULL "
+                 "WHERE docket_number = ? AND seq = 1", (d,))
+    conn.commit()
+    pod = client.get(f"/api/driver/v1/jobs/{d}", headers=h).get_json()["job"]["pod"]
+    assert pod[0]["photo"] and pod[0]["photo"].startswith("/media/legacy_fail.png")

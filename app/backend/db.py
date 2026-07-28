@@ -387,6 +387,51 @@ SCHEMA = [
         detail_json TEXT
     )
     """,
+    # ── Job offers (dispatch offers work; the driver accepts or declines
+    #    within a countdown — decline/expiry returns it to the ops board) ─
+    """
+    CREATE TABLE IF NOT EXISTS offers (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        docket_number  TEXT NOT NULL,
+        driver_id      TEXT NOT NULL,
+        status         TEXT NOT NULL DEFAULT 'pending',  -- pending | accepted | declined | expired | withdrawn
+        offered_by     TEXT,
+        offered_at     TEXT NOT NULL,
+        expires_at     TEXT NOT NULL,
+        responded_at   TEXT,
+        decline_reason TEXT
+    )
+    """,
+    # ── Vehicle inspection checklist (shift-start walkaround; advisory —
+    #    defects flag to ops via a message but never block the shift) ─────
+    """
+    CREATE TABLE IF NOT EXISTS vehicle_checks (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        driver_id  TEXT NOT NULL,
+        shift_id   INTEGER NOT NULL,
+        odometer   INTEGER,
+        items_json TEXT NOT NULL,
+        defects    TEXT,
+        photo_ref  TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    # ── TOM bridge outbox (durable driver→TOM event queue; env-gated OFF
+    #    by default — see bridge.py for the delivery/backoff contract) ────
+    """
+    CREATE TABLE IF NOT EXISTS bridge_outbox (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind         TEXT NOT NULL,                     -- status | pod | locations | scans
+        payload_json TEXT NOT NULL,
+        status       TEXT NOT NULL DEFAULT 'pending',   -- pending | sending | sent | dead
+        attempts     INTEGER NOT NULL DEFAULT 0,
+        next_attempt TEXT,
+        last_error   TEXT,
+        claimed_at   TEXT,
+        created_at   TEXT NOT NULL,
+        sent_at      TEXT
+    )
+    """,
 ]
 
 _INDEXES = [
@@ -409,6 +454,10 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_rate_events_bucket ON rate_events(bucket, ts)",
     "CREATE INDEX IF NOT EXISTS idx_ops_tokens_user ON ops_tokens(username)",
     "CREATE INDEX IF NOT EXISTS idx_messages_docket ON messages(docket_number)",
+    "CREATE INDEX IF NOT EXISTS idx_offers_driver ON offers(driver_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_offers_docket ON offers(docket_number, id)",
+    "CREATE INDEX IF NOT EXISTS idx_vehicle_checks_shift ON vehicle_checks(shift_id)",
+    "CREATE INDEX IF NOT EXISTS idx_bridge_outbox_status ON bridge_outbox(status, next_attempt, id)",
 ]
 
 # Additive migrations for an already-created DB (column -> def). New tables are
@@ -434,6 +483,13 @@ _MIGRATIONS = [
     ("drivers", "location_consent_at", "TEXT"),
     ("drivers", "avatar_url", "TEXT"), ("drivers", "vehicle_photo_url", "TEXT"),
     ("drops", "pod_photos", "TEXT"),     # JSON list of media refs (multi-photo POD)
+    ("drops", "pod_lat", "REAL"),        # where the POD was captured (device GPS)
+    ("drops", "pod_lng", "REAL"),
+    ("drops", "arrived_at", "TEXT"),     # per-drop arrival stamp (status 'arrived')
+    ("drops", "fail_photo", "TEXT"),     # failed-delivery photo (was misfiled in pod_photo)
+    ("shifts", "break_started_at", "TEXT"),                    # open break, if any
+    ("shifts", "break_minutes", "INTEGER NOT NULL DEFAULT 0"), # accumulated break time
+    ("drivers", "text_size", "TEXT DEFAULT 'normal'"),         # normal | large | extra
     ("messages", "category", "TEXT"),
     ("messages", "docket_number", "TEXT"),   # optional per-job chat tag (ops console)
     ("push_outbox", "claimed_at", "TEXT"),   # worker claim stamp (multi-worker flush)

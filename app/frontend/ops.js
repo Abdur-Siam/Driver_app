@@ -382,7 +382,7 @@ async function openJob(docket) {
   try { drivers = (await apiFetch('/drivers')).drivers; } catch (e) {}
   const closed = job.status === 'COMPLETED' || job.status === 'CANCELLED';
   const dropRows = job.drops.map(d => `<div class="kv"><span class="k">Drop ${d.seq} · ${esc(d.postcode || '')}</span>
-    <span class="pill ${d.status === 'delivered' ? 'green' : d.status === 'failed' ? 'red' : 'grey'}">${esc(d.status)}</span></div>
+    <span class="pill ${d.status === 'delivered' ? 'green' : d.status === 'failed' ? 'red' : d.status === 'arrived' ? 'amber' : 'grey'}">${esc(d.status)}</span></div>
     <div class="tiny muted" style="margin:-2px 0 8px">${esc(d.address || '')}${d.contact ? ' · ' + esc(d.contact) : ''}${d.instructions ? ' · ' + esc(d.instructions) : ''}</div>`).join('');
   const opts = drivers.map(d => `<option value="${esc(d.driver_id)}" ${d.driver_id === job.driver_id ? 'selected' : ''}>${esc(d.name)} (${esc(d.callsign)})${d.active ? '' : ' — inactive'}</option>`).join('');
   openDrawer(`<span class="mono">${esc(docket)}</span> ${lifePill(job.lifecycle_status)}`, `

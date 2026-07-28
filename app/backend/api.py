@@ -320,6 +320,29 @@ def job_pod(docket):
     return _idempotent("pod", do)
 
 
+@api.route("/jobs/<docket>/drops/<int:seq>/arrive", methods=["POST"])
+@require_token
+def drop_arrive(docket, seq):
+    """Mark arrival at a drop (pending → arrived) — an audited waypoint before
+    the POD/failure flow. Idempotency-keyed like the rest of the outbox verbs."""
+    def do():
+        body = request.get_json(silent=True) or {}
+        r = store.arrive_at_drop(docket, g.driver_id, seq, body.get("lat"), body.get("lng"))
+        if not r["ok"]:
+            reason = r["reason"]
+            if reason == "not_found":
+                return _err("job_not_found", "Job not found", 404)
+            if reason == "drop_not_found":
+                return _err("drop_not_found", "Drop not found", 404)
+            if reason == "already_arrived":
+                return _err("already_arrived", "Already marked as arrived", 409)
+            if reason == "already_resolved":
+                return _err("already_resolved", "Drop already delivered or failed", 409)
+            return _err("invalid_state", "Arrival not allowed from the job's current state", 409)
+        return jsonify({"success": True, **r}), 200
+    return _idempotent("arrive", do)
+
+
 @api.route("/jobs/<docket>/fail", methods=["POST"])
 @require_token
 def job_fail(docket):
