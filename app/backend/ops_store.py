@@ -111,6 +111,11 @@ def driver_detail(driver_id) -> Optional[Dict[str, Any]]:
 
 # ── Live tracking ────────────────────────────────────────────────────
 
+# A fix older than this is flagged stale on the map snapshot — the marker is
+# still shown (dispatch wants last-known position) but must not read as live.
+STALE_FIX_S = 900
+
+
 def tracking_snapshot() -> List[Dict[str, Any]]:
     """One row per driver that has a location fix — the map markers. Includes
     duty status and the job they're currently working so a dispatcher can see
@@ -125,12 +130,14 @@ def tracking_snapshot() -> List[Dict[str, Any]]:
         loc = store.latest_location(did)
         if not loc or loc.get("lat") is None or loc.get("lng") is None:
             continue
+        age = _age_seconds(loc["recorded_at"])
         out.append({
             "driver_id": did, "name": r["name"], "callsign": r["callsign"],
             "vehicle": r["vehicle"], "duty_status": r["duty_status"],
             "on_shift": bool(store.get_active_shift(did)),
             "lat": loc["lat"], "lng": loc["lng"],
-            "recorded_at": loc["recorded_at"], "age_s": _age_seconds(loc["recorded_at"]),
+            "recorded_at": loc["recorded_at"], "age_s": age,
+            "stale": age is None or age > STALE_FIX_S,
             "current_docket": _current_docket(did),
         })
     return out

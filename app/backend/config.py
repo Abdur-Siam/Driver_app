@@ -7,14 +7,34 @@ against a real backend. See README.md.
 from __future__ import annotations
 
 import os
+import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _APP_ROOT = os.path.dirname(_HERE)              # Driver/app
 
 # development (default) | production. Production refuses to boot without an
 # env-supplied secret and never seeds demo data (see server.create_app).
-APP_ENV = os.environ.get("DRIVER_APP_ENV", "development").strip().lower()
+_APP_ENV_RAW = os.environ.get("DRIVER_APP_ENV", "").strip().lower()
+APP_ENV_DECLARED = bool(_APP_ENV_RAW)           # was the environment set explicitly?
+APP_ENV = _APP_ENV_RAW or "development"
 IS_PRODUCTION = APP_ENV == "production"
+
+
+def _under_gunicorn() -> bool:
+    """True when this process is being served by gunicorn — a strong signal
+    of a real deployment even if DRIVER_APP_ENV was forgotten."""
+    if "gunicorn" in (os.environ.get("SERVER_SOFTWARE", "") or "").lower():
+        return True
+    if os.environ.get("GUNICORN_CMD_ARGS"):
+        return True
+    argv0 = (sys.argv[0] if sys.argv else "") or ""
+    return "gunicorn" in os.path.basename(argv0).lower()
+
+
+# Fail-safe: an UNDECLARED environment running under gunicorn is treated as
+# production-like — demo credentials are never seeded there. Declaring
+# DRIVER_APP_ENV (either value) always wins over the heuristic.
+IS_PRODUCTION_LIKE = IS_PRODUCTION or (not APP_ENV_DECLARED and _under_gunicorn())
 
 # Data root — override in production so the DB + POD media land on persistent
 # storage (e.g. /home on Azure App Service; container-local disk is ephemeral).
@@ -125,6 +145,8 @@ CORS_ORIGINS = [o.strip() for o in os.environ.get(
     "capacitor://localhost,https://localhost,http://localhost,ionic://localhost",
 ).split(",") if o.strip()]
 
-# Reseed the demo data on boot if the DB is empty. Hard-off in production —
-# demo credentials (DRV001/test1234) must never exist on a commercial deploy.
-SEED_DEMO = (os.environ.get("DRIVER_APP_SEED_DEMO", "1") == "1") and not IS_PRODUCTION
+# Reseed the demo data on boot if the DB is empty. Hard-off in production and
+# in production-like contexts (undeclared env under gunicorn) — demo
+# credentials (DRV001/test1234) must never exist on a commercial deploy.
+# Default stays on for plain local runs (run.sh / serve.py dev ergonomics).
+SEED_DEMO = (os.environ.get("DRIVER_APP_SEED_DEMO", "1") == "1") and not IS_PRODUCTION_LIKE

@@ -11,7 +11,7 @@ import os
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from . import auth, config, storage
+from . import auth, config, storage, store
 from .api import api
 from .db import init_db
 from .ops_api import ops_api
@@ -29,6 +29,22 @@ except Exception:
 
 
 def create_app() -> Flask:
+    # Fail-safe: environment not declared. Say so LOUDLY, and if this looks
+    # like a real deployment (gunicorn) demo seeding is already refused
+    # (config.SEED_DEMO is forced off for production-like contexts).
+    if not config.APP_ENV_DECLARED:
+        print(
+            "=" * 72 + "\n"
+            "[driver-app] WARNING: DRIVER_APP_ENV is NOT set.\n"
+            "[driver-app] Set DRIVER_APP_ENV=production on any real deployment\n"
+            "[driver-app] (enforces DRIVER_APP_SECRET and blocks demo credentials)\n"
+            "[driver-app] or DRIVER_APP_ENV=development to silence this warning.\n"
+            + ("[driver-app] gunicorn detected → treating as PRODUCTION-LIKE: "
+               "demo data will NOT be seeded.\n" if config.IS_PRODUCTION_LIKE else "")
+            + "=" * 72,
+            flush=True,
+        )
+
     # Production guardrails — fail the boot, not the first driver.
     if config.IS_PRODUCTION:
         if not os.environ.get("DRIVER_APP_SECRET", "").strip():
@@ -88,13 +104,17 @@ def create_app() -> Flask:
     @app.route("/media/<path:name>")
     def media(name):
         # POD/receipt media is personal data — require a valid driver-scoped
-        # signed URL (?exp=&did=&sig=) or an authenticated bearer token.
+        # signed URL (?exp=&did=&sig=) or the OWNING driver's bearer token.
         exp, did, sig = request.args.get("exp"), request.args.get("did", ""), request.args.get("sig")
         authd = storage.verify_media_token(name, exp, did, sig)
         if not authd:
             a = request.headers.get("Authorization", "") or ""
             tok = a[7:].strip() if a.startswith("Bearer ") else ""
-            authd = bool(tok and auth.resolve_token(tok))
+            bearer_did = auth.resolve_token(tok) if tok else None
+            # Bearer fallback is bound to ownership: any valid token is NOT
+            # enough — the media record must belong to this driver. Unknown
+            # media (no owner on record) fails closed.
+            authd = bool(bearer_did and store.media_owner(name) == bearer_did)
         if not authd:
             return jsonify({"error": {"code": "forbidden", "message": "Media access denied"}}), 403
         resp = send_from_directory(config.MEDIA_DIR, name)

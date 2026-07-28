@@ -126,6 +126,9 @@ def cfg():
         "maps_browser_key": config.GOOGLE_MAPS_BROWSER_KEY or None,
         "maps_enabled": bool(config.GOOGLE_MAPS_BROWSER_KEY),
         "app_version": config.APP_VERSION,
+        # Demo environment (seeded demo credentials exist) — the login screen
+        # only shows the DRV001/test1234 hint when this is true.
+        "demo": bool(config.SEED_DEMO),
     })
 
 
@@ -346,7 +349,18 @@ def location_batch():
     if not store.has_location_consent(g.driver_id):
         return _err("consent_required", "Location consent not granted", 403)
     body = request.get_json(silent=True) or {}
-    n = store.record_locations(g.driver_id, body.get("pings") or [])
+    pings = body.get("pings") or []
+    # Tracking is a shift-time activity: with no open shift, only pings whose
+    # recorded timestamp falls before the last shift ended (the offline queue
+    # legitimately flushes late) are accepted; anything newer is rejected with
+    # 409 so the device knows to stop sending.
+    if isinstance(pings, list) and pings and not store.get_active_shift(g.driver_id):
+        cutoff = store.last_shift_ended_at(g.driver_id)
+        pings = [p for p in pings
+                 if isinstance(p, dict) and cutoff and p.get("t") and str(p["t"]) <= cutoff]
+        if not pings:
+            return _err("no_active_shift", "Not on shift — location not accepted", 409)
+    n = store.record_locations(g.driver_id, pings)
     return jsonify({"accepted": n}), 202
 
 
@@ -433,9 +447,22 @@ def messages_post():
     if not text:
         return _err("invalid_request", "Message text required", 400)
     category = body.get("category")
-    msg = store.add_message(g.driver_id, "driver", text, category)
-    store.audit(g.driver_id, "message:sent", detail={"category": category})
+    # Optional per-job tag: a reply sent with a docket joins that job's thread
+    # in the ops console. The driver must own the job (any status — a query
+    # about completed/cancelled work is legitimate).
+    docket = (body.get("docket_number") or body.get("docket") or "").strip() or None
+    if docket and not store._job_row(docket, g.driver_id):
+        return _err("job_not_found", "Job not found", 404)
+    msg = store.add_message(g.driver_id, "driver", text, category, docket)
+    store.audit(g.driver_id, "message:sent", detail={"category": category, "docket": docket})
     return jsonify({"success": True, "message": msg})
+
+
+@api.route("/messages/read", methods=["POST"])
+@require_token
+def messages_read():
+    """Mark every ops→driver message read (the inbox was opened)."""
+    return jsonify({"success": True, "marked": store.mark_messages_read(g.driver_id)})
 
 
 # ── shift & availability ─────────────────────────────────────────────

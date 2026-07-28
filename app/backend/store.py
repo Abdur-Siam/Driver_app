@@ -201,11 +201,19 @@ def _project_job(job: Dict[str, Any], full: bool = False) -> Dict[str, Any]:
 
 def list_run(driver_id, date=None) -> List[Dict[str, Any]]:
     conn = get_connection()
+    # Optional ISO-date filter (?date=YYYY-MM-DD). 'today'/blank/junk = no filter,
+    # preserving the historic behaviour of returning all active jobs.
+    where, params = "", [driver_id]
+    if isinstance(date, str):
+        d = date.strip()
+        if len(d) == 10 and d[4] == "-" and d[7] == "-":
+            where = "AND operational_date = ? "
+            params.append(d)
     rows = conn.execute(
         "SELECT docket_number FROM jobs WHERE driver_id = ? "
-        "AND status NOT IN ('COMPLETED','CANCELLED') "
+        "AND status NOT IN ('COMPLETED','CANCELLED') " + where +
         "ORDER BY (sequence_position IS NULL), sequence_position, deadline, docket_number",
-        (driver_id,),
+        params,
     ).fetchall()
     return [_project_job(_job_row(r["docket_number"]), full=False) for r in rows]
 
@@ -271,10 +279,11 @@ def _maybe_complete_job(docket, driver_id) -> bool:
     drops = _drops_for(docket)
     if drops and all(d["status"] in ("delivered", "failed") for d in drops):
         conn = get_connection()
+        ts = _now()
         conn.execute(
             "UPDATE jobs SET status = 'COMPLETED', lifecycle_status = 'completed', "
-            "updated_at = ? WHERE docket_number = ?",
-            (_now(), docket),
+            "completed_at = ?, updated_at = ? WHERE docket_number = ?",
+            (ts, ts, docket),
         )
         conn.commit()
         audit(driver_id, "job:completed", docket)
@@ -404,6 +413,25 @@ def fail_drop(docket, driver_id, drop_seq, reason, note=None, photo_ref=None) ->
 
 # ── Location ─────────────────────────────────────────────────────────
 
+def _coord(v, lo: float, hi: float) -> Optional[float]:
+    """A finite number within [lo, hi], else None."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")) or f < lo or f > hi:
+        return None
+    return f
+
+
+def _numeric(v) -> Optional[float]:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if (f != f or f in (float("inf"), float("-inf"))) else f
+
+
 def record_locations(driver_id, pings: List[Dict[str, Any]]) -> int:
     if not isinstance(pings, list):
         return 0
@@ -412,6 +440,11 @@ def record_locations(driver_id, pings: List[Dict[str, Any]]) -> int:
     recv = _now()
     for p in pings:
         if not isinstance(p, dict):
+            continue
+        # Validate coordinates: a ping with a missing/non-numeric/out-of-range
+        # lat or lng is junk — skip it rather than store an unusable row.
+        lat, lng = _coord(p.get("lat"), -90, 90), _coord(p.get("lng"), -180, 180)
+        if lat is None or lng is None:
             continue
         # INSERT OR IGNORE on the (driver_id, ping_id) unique index: a batch
         # replayed after a flaky reconnect (the offline buffer re-sends until it
@@ -422,8 +455,8 @@ def record_locations(driver_id, pings: List[Dict[str, Any]]) -> int:
             "recorded_at, received_at, lat, lng, speed, heading, accuracy, battery) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (driver_id, p.get("id"), p.get("job") or p.get("docket"), p.get("t"),
-             recv, p.get("lat"), p.get("lng"), p.get("spd"), p.get("hdg"),
-             p.get("acc"), p.get("bat")),
+             recv, lat, lng, _numeric(p.get("spd")), _numeric(p.get("hdg")),
+             _numeric(p.get("acc")), _numeric(p.get("bat"))),
         )
         n += max(cur.rowcount, 0)  # count only rows actually inserted (0 if deduped)
     conn.commit()
@@ -436,6 +469,32 @@ def latest_location(driver_id) -> Optional[Dict[str, Any]]:
         "ORDER BY id DESC LIMIT 1", (driver_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+# ── Media ownership ──────────────────────────────────────────────────
+
+def media_owner(name: str) -> Optional[str]:
+    """Which driver a stored media file belongs to (None if unknown). Media
+    refs are recorded as 'media/<name>' on expenses receipts, driver profile
+    photos and drop POD fields (owner = the job's driver)."""
+    ref = "media/" + name
+    conn = get_connection()
+    r = conn.execute("SELECT driver_id FROM expenses WHERE receipt = ? LIMIT 1", (ref,)).fetchone()
+    if r:
+        return r["driver_id"]
+    r = conn.execute(
+        "SELECT driver_id FROM drivers WHERE avatar_url = ? OR vehicle_photo_url = ? LIMIT 1",
+        (ref, ref),
+    ).fetchone()
+    if r:
+        return r["driver_id"]
+    r = conn.execute(
+        "SELECT j.driver_id AS driver_id FROM drops d "
+        "JOIN jobs j ON j.docket_number = d.docket_number "
+        "WHERE d.pod_signature = ? OR d.pod_photo = ? OR d.pod_photos LIKE ? LIMIT 1",
+        (ref, ref, '%"' + ref + '"%'),
+    ).fetchone()
+    return r["driver_id"] if r else None
 
 
 # ── Route order ──────────────────────────────────────────────────────
@@ -475,6 +534,17 @@ def list_messages(driver_id) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def mark_messages_read(driver_id) -> int:
+    """Driver-side mark-read: flag every ops→driver message as read (the
+    mirror of ops_store.mark_thread_read, which covers driver→ops)."""
+    conn = get_connection()
+    cur = conn.execute(
+        "UPDATE messages SET read = 1 WHERE driver_id = ? AND direction = 'ops' AND read = 0",
+        (driver_id,))
+    conn.commit()
+    return cur.rowcount
+
+
 def add_message(driver_id, direction, text, category=None, docket=None) -> Dict[str, Any]:
     conn = get_connection()
     cur = conn.execute(
@@ -499,6 +569,16 @@ def get_active_shift(driver_id) -> Optional[Dict[str, Any]]:
         "WHERE driver_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1", (driver_id,),
     ).fetchone()
     return dict(r) if r else None
+
+
+def last_shift_ended_at(driver_id) -> Optional[str]:
+    """When the driver's most recent shift ended (None if never on shift).
+    Used to accept late-flushed GPS pings recorded during that shift."""
+    r = get_connection().execute(
+        "SELECT ended_at FROM shifts WHERE driver_id = ? AND status = 'ended' "
+        "ORDER BY id DESC LIMIT 1", (driver_id,),
+    ).fetchone()
+    return r["ended_at"] if r else None
 
 
 def start_shift(driver_id, planned_end) -> Dict[str, Any]:

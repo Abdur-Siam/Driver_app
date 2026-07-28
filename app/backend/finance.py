@@ -7,13 +7,28 @@ read/write.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from .db import get_connection
 
-TODAY = date(2026, 6, 26)          # demo anchor (matches seed)
+
+def today() -> date:
+    """Operational 'today'. The real current date, evaluated per call (a
+    long-running worker rolls over at midnight — never an import-time
+    constant). DRIVER_APP_TODAY (ISO date) overrides it so demo environments
+    and tests can pin the date to the seed anchor deterministically."""
+    override = os.environ.get("DRIVER_APP_TODAY", "").strip()
+    if override:
+        try:
+            return date.fromisoformat(override)
+        except ValueError:
+            pass
+    return date.today()
+
+
 INSTANT_PAY_FEE_PCT = 1.5          # % fee on early payout (typical gig model)
 TAX_SET_ASIDE_PCT = 25             # suggested set-aside for self-employed
 HMRC_MILEAGE_RATE = 0.45           # £/mile, first 10k miles
@@ -82,7 +97,7 @@ def earnings_summary(driver_id) -> Dict[str, Any]:
     jobs = [dict(r) for r in conn.execute(
         "SELECT docket_number, account, status, driver_pay_final, base_pay, waiting_pay, toll_pay, "
         "extras_pay, bonus_pay, deduction, miles FROM jobs WHERE driver_id = ? AND operational_date = ?",
-        (driver_id, TODAY.isoformat()),
+        (driver_id, today().isoformat()),
     ).fetchall()]
     today_earned = sum(_f(j["driver_pay_final"]) for j in jobs if j["status"] == "COMPLETED")
     today_onrun = sum(_f(j["driver_pay_final"]) for j in jobs if j["status"] not in ("COMPLETED", "CANCELLED"))
@@ -199,7 +214,7 @@ def add_expense(driver_id, etype, amount, exp_date, note, receipt) -> Dict[str, 
     cur = conn.execute(
         "INSERT INTO expenses (driver_id, type, amount, exp_date, note, receipt, status, created_at) "
         "VALUES (?,?,?,?,?,?,'submitted',?)",
-        (driver_id, etype, _money(_f(amount)), exp_date or TODAY.isoformat(), note, receipt, _now()),
+        (driver_id, etype, _money(_f(amount)), exp_date or today().isoformat(), note, receipt, _now()),
     )
     conn.commit()
     return {"id": cur.lastrowid, "status": "submitted"}

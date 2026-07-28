@@ -26,6 +26,7 @@ const S = {
   home: null, earnings: null, statements: [], statement: null,
   profile: null, pending: [], expenses: [], tax: null,
   shift: null, dutyStatus: 'off', history: [], appVersion: '1.0.0',
+  demo: false,                     // server says demo creds exist (login hint)
 };
 
 const LS_THEME = 'tom_driver_theme';
@@ -68,14 +69,21 @@ async function mutate(path, body, { idemKey } = {}) {
     const r = await api(path, { method: 'POST', body, idemKey: key });
     return r;
   } catch (e) {
-    queueOutbox({ path, body, key }); syncChip();
-    return { ok: false, queued: true, status: 0, data: null };
+    const queued = queueOutbox({ path, body, key }); syncChip();
+    return { ok: false, queued, status: 0, data: null };
   }
 }
 
 function queueOutbox(item) {
   const q = JSON.parse(localStorage.getItem(LS.outbox) || '[]');
-  q.push({ ...item, at: Date.now() }); localStorage.setItem(LS.outbox, JSON.stringify(q));
+  q.push({ ...item, at: Date.now() });
+  try { localStorage.setItem(LS.outbox, JSON.stringify(q)); return true; }
+  catch (e) {
+    // Storage quota exceeded — a queued POD/status action would be silently
+    // lost. Make the failure VISIBLE so the driver keeps the evidence.
+    toast('Phone storage is full — this could not be saved for later. Free up space, or retry when you have signal.', true);
+    return false;
+  }
 }
 async function drainOutbox() {
   let q = JSON.parse(localStorage.getItem(LS.outbox) || '[]');
@@ -138,7 +146,7 @@ function deviceId() {
 }
 
 /* ── data loads ── */
-async function loadConfig() { try { const r = await api('/config'); if (r.ok) { S.mapsKey = r.data.maps_browser_key; S.appVersion = r.data.app_version || S.appVersion; } } catch (e) {} }
+async function loadConfig() { try { const r = await api('/config'); if (r.ok) { S.mapsKey = r.data.maps_browser_key; S.appVersion = r.data.app_version || S.appVersion; S.demo = !!r.data.demo; } } catch (e) {} }
 async function loadRun() {
   try {
     const r = await api('/run');
@@ -155,6 +163,14 @@ async function loadRun() {
 }
 async function loadJob(docket) { try { const r = await api('/jobs/' + docket); S.job = r.ok ? r.data.job : null; } catch (e) { S.job = null; } }
 async function loadMessages() { try { const r = await api('/messages'); if (r.ok) { S.messages = r.data.messages; S.unread = r.data.messages.filter(m => m.direction === 'ops' && !m.read).length; } } catch (e) {} }
+// Opening the inbox marks ops messages read (clears the badge server-side too).
+async function markMessagesRead() {
+  if (!S.unread) return;
+  try {
+    const r = await api('/messages/read', { method: 'POST' });
+    if (r.ok) { S.unread = 0; S.messages = S.messages.map(m => (m.direction === 'ops' ? { ...m, read: 1 } : m)); }
+  } catch (e) {} // offline — badge clears on the next online open
+}
 async function loadHome() { try { const r = await api('/home'); if (r.ok) { S.home = r.data; S.unread = r.data.unread_messages || 0; S.shift = r.data.shift; S.dutyStatus = r.data.duty_status; } } catch (e) {} }
 async function loadEarnings() { try { const r = await api('/earnings'); if (r.ok) S.earnings = r.data; } catch (e) {} }
 async function loadStatements() { try { const r = await api('/statements'); if (r.ok) S.statements = r.data.statements; } catch (e) {} }
@@ -269,7 +285,7 @@ function loginScreen() {
     <input id="pw" type="password" autocomplete="current-password" placeholder="••••••••" />
     <div class="spacer"></div>
     <button class="btn" id="loginbtn">Sign in</button>
-    <p class="muted tiny" style="text-align:center;margin-top:18px">Demo: DRV001 / test1234</p>
+    ${S.demo ? '<p class="muted tiny" style="text-align:center;margin-top:18px">Demo: DRV001 / test1234</p>' : ''}
   </div>`);
   v.querySelector('#loginbtn').onclick = async (e) => {
     const id = v.querySelector('#id').value.trim(), pw = v.querySelector('#pw').value;
@@ -809,7 +825,15 @@ async function setDuty(status) {
 }
 async function endShift() {
   const r = await mutate('/shift/end', {});
-  if (r.ok || r.queued) { S.shift = null; S.dutyStatus = 'off'; toast('Shift ended'); go('#/home'); }
+  if (r.ok || r.queued) {
+    S.shift = null; S.dutyStatus = 'off';
+    // Shift over → stop sharing location (keeps the consent promise: "only
+    // while you work"), then flush any pings recorded during the shift —
+    // the server still accepts those (their timestamps predate shift end).
+    stopTracking();
+    flushPings();
+    toast('Shift ended'); go('#/home');
+  }
 }
 function shiftBlock() {
   if (!S.shift) {
@@ -1500,6 +1524,10 @@ async function flushPings() {
     if (r.ok || (r.status >= 200 && r.status < 300)) {
       pingQueueSet(pingQueueGet().filter(p => !ids.has(p.id)));
       if (pingQueueLen()) setTimeout(flushPings, 500); // drain a long backlog
+    } else if (r.status === 409) {
+      // Definitive: not on shift — the server will never take these points,
+      // so drop them rather than wedge the queue in a retry loop.
+      pingQueueSet(pingQueueGet().filter(p => !ids.has(p.id)));
     }
   } catch (e) { /* offline — keep buffered, retry on interval / reconnect */ }
 }
@@ -1622,7 +1650,7 @@ async function render() {
   else if (route === 'about') view = aboutScreen();
   else if (route === 'terms') view = infoScreen('Terms of service', ['By using TOM Driver you agree to carry out assigned jobs in line with the Xtra Mile Couriers driver agreement.', 'These in-app terms summarise the signed contract held by ops, which prevails.', '<span class="muted small">Full terms are provided by the operations team.</span>']);
   else if (route === 'privacy-policy') view = infoScreen('Privacy policy', ['We process your data to operate courier services: account, jobs, proof of delivery, and — with consent, while on shift — location.', 'Data is retained as required for tax and operational records and shared only with the relevant customer and ops.', 'Manage your rights under <a class="link" href="#/privacy">Privacy &amp; data</a>.', '<span class="muted small">The full policy is provided by the operations team.</span>']);
-  else if (route === 'messages') { await loadMessages(); view = messagesScreen(); }
+  else if (route === 'messages') { await loadMessages(); await markMessagesRead(); view = messagesScreen(); }
   else if (route === 'me') view = meScreen();
   else { await Promise.all([loadHome(), loadMessages()]); view = homeScreen(); }
   root.appendChild(view);

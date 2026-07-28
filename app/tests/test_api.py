@@ -250,6 +250,8 @@ def test_pod_completes_single_drop_job(client):
 def test_location_batch_accepted(client):
     h = _auth(client)
     client.post("/api/driver/v1/consent/location", json={"granted": True}, headers=h)
+    # Tracking is shift-gated: an on-shift driver's pings are accepted.
+    client.post("/api/driver/v1/shift/start", json={"planned_end": "18:00"}, headers=h)
     r = client.post("/api/driver/v1/location/batch",
                     json={"pings": [{"t": "2026-06-26T08:00:00Z", "lat": 51.52, "lng": -0.1}]}, headers=h)
     assert r.status_code == 202 and r.get_json()["accepted"] == 1
@@ -261,6 +263,7 @@ def test_location_batch_dedups_replayed_pings(client):
     # make the replay a no-op — no duplicate location rows.
     h = _auth(client)
     client.post("/api/driver/v1/consent/location", json={"granted": True}, headers=h)
+    client.post("/api/driver/v1/shift/start", json={"planned_end": "18:00"}, headers=h)
     batch = {"pings": [
         {"id": "p-1", "t": "2026-06-26T09:00:00Z", "lat": 51.50, "lng": -0.12},
         {"id": "p-2", "t": "2026-06-26T09:00:05Z", "lat": 51.51, "lng": -0.11},
@@ -881,3 +884,166 @@ def test_routing_sends_referer_for_restricted_key(monkeypatch):
     # urllib.request.Request title-cases header keys.
     assert captured["headers"].get("Referer") == "https://driver.example/"
     assert captured["headers"].get("X-goog-api-key") == "AIza-shared"
+
+# ── QA-audit hardening fixes (July 2026) ──────────────────────────────
+
+def test_finance_today_is_live_with_env_override(monkeypatch):
+    """No more frozen demo date: finance.today() is the real current date,
+    evaluated per call, with DRIVER_APP_TODAY as a deterministic override."""
+    from datetime import date
+    from backend import finance
+    monkeypatch.delenv("DRIVER_APP_TODAY", raising=False)
+    assert finance.today() == date.today()
+    monkeypatch.setenv("DRIVER_APP_TODAY", "2026-06-26")
+    assert finance.today() == date(2026, 6, 26)
+    monkeypatch.setenv("DRIVER_APP_TODAY", "not-a-date")
+    assert finance.today() == date.today()          # bad override ignored
+
+
+def test_todays_earnings_follow_the_real_date(client, monkeypatch):
+    """Seed data is anchored to 2026-06-26. Pinned there, the seeded jobs are
+    today's work; unpinned (the real date), they are not."""
+    h = _auth(client)
+    monkeypatch.setenv("DRIVER_APP_TODAY", "2026-06-26")
+    b = client.get("/api/driver/v1/earnings", headers=h).get_json()
+    assert b["today"]["jobs_total"] == 2
+    monkeypatch.delenv("DRIVER_APP_TODAY")
+    b = client.get("/api/driver/v1/earnings", headers=h).get_json()
+    assert b["today"]["jobs_total"] == 0
+
+
+def test_driver_reply_docket_requires_ownership(client):
+    h = _auth(client)
+    # Someone else's job → refused.
+    r = client.post("/api/driver/v1/messages",
+                    json={"text": "On my way", "docket_number": "XM-20260626-0067"}, headers=h)
+    assert r.status_code == 404
+    # Own job → stored with the docket tag.
+    r = client.post("/api/driver/v1/messages",
+                    json={"text": "At pickup now", "docket_number": "XM-20260626-0042"}, headers=h)
+    assert r.status_code == 200
+    assert r.get_json()["message"]["docket_number"] == "XM-20260626-0042"
+
+
+def test_driver_mark_read_clears_unread_badge(client):
+    h = _auth(client)   # seed leaves one unread ops message
+    assert client.get("/api/driver/v1/home", headers=h).get_json()["unread_messages"] >= 1
+    r = client.post("/api/driver/v1/messages/read", headers=h)
+    assert r.status_code == 200 and r.get_json()["marked"] >= 1
+    assert client.get("/api/driver/v1/home", headers=h).get_json()["unread_messages"] == 0
+    msgs = client.get("/api/driver/v1/messages", headers=h).get_json()["messages"]
+    assert all(m["read"] for m in msgs if m["direction"] == "ops")
+
+
+def test_location_batch_rejected_off_shift(client):
+    """Never been on shift → live pings are refused with 409 so the device
+    knows to stop sending."""
+    h = _auth(client)
+    client.post("/api/driver/v1/consent/location", json={"granted": True}, headers=h)
+    r = client.post("/api/driver/v1/location/batch",
+                    json={"pings": [{"t": "2026-06-26T08:00:00Z", "lat": 51.5, "lng": -0.1}]}, headers=h)
+    assert r.status_code == 409
+    assert r.get_json()["error"]["code"] == "no_active_shift"
+
+
+def test_location_batch_accepts_late_flush_of_onshift_pings(client):
+    """The offline queue may flush AFTER shift end: pings recorded during the
+    shift still store; pings timestamped after shift end are refused."""
+    h = _auth(client)
+    client.post("/api/driver/v1/consent/location", json={"granted": True}, headers=h)
+    client.post("/api/driver/v1/shift/start", json={"planned_end": "18:00"}, headers=h)
+    client.post("/api/driver/v1/shift/end", headers=h)
+    during = "2000-01-01T00:00:00Z"                 # before ended_at → on-shift
+    after = "2999-01-01T00:00:00Z"                  # after ended_at → off-shift
+    r = client.post("/api/driver/v1/location/batch", json={"pings": [
+        {"id": "on-1", "t": during, "lat": 51.5, "lng": -0.1},
+        {"id": "off-1", "t": after, "lat": 51.5, "lng": -0.1},
+    ]}, headers=h)
+    assert r.status_code == 202 and r.get_json()["accepted"] == 1
+    r2 = client.post("/api/driver/v1/location/batch",
+                     json={"pings": [{"id": "off-2", "t": after, "lat": 51.5, "lng": -0.1}]}, headers=h)
+    assert r2.status_code == 409
+
+
+def test_location_ping_coordinate_validation(client):
+    """Junk coordinates never reach the locations table; a bad numeric extra
+    (speed etc.) is nulled but the fix itself is kept."""
+    h = _auth(client)
+    client.post("/api/driver/v1/consent/location", json={"granted": True}, headers=h)
+    client.post("/api/driver/v1/shift/start", json={"planned_end": "18:00"}, headers=h)
+    r = client.post("/api/driver/v1/location/batch", json={"pings": [
+        {"t": "2026-06-26T08:00:00Z", "lat": 91.0, "lng": -0.1},     # lat out of range
+        {"t": "2026-06-26T08:00:01Z", "lat": "junk", "lng": -0.1},   # non-numeric
+        {"t": "2026-06-26T08:00:02Z", "lng": -0.1},                  # missing lat
+        {"t": "2026-06-26T08:00:03Z", "lat": 51.5, "lng": -200.0},   # lng out of range
+        {"t": "2026-06-26T08:00:04Z", "lat": 51.5, "lng": -0.1, "spd": "fast"},
+    ]}, headers=h)
+    assert r.status_code == 202 and r.get_json()["accepted"] == 1
+    from backend.db import get_connection
+    row = get_connection().execute(
+        "SELECT speed FROM locations WHERE driver_id='DRV001' AND recorded_at='2026-06-26T08:00:04Z'"
+    ).fetchone()
+    assert row is not None and row["speed"] is None
+
+
+def test_completed_job_stamps_completed_at(client):
+    h = _auth(client)
+    _complete_pod_with_signature(client, h)     # single-drop job → COMPLETED
+    from backend.db import get_connection
+    row = get_connection().execute(
+        "SELECT status, completed_at FROM jobs WHERE docket_number = 'XM-20260626-0051'").fetchone()
+    assert row["status"] == "COMPLETED"
+    assert row["completed_at"]
+
+
+def test_media_bearer_fallback_bound_to_owner(client):
+    """A valid bearer token is no longer enough for /media/* — the media must
+    BELONG to that driver. Cross-driver access is denied."""
+    h = _auth(client)
+    url = _complete_pod_with_signature(client, h)
+    bare = url.split("?")[0]                        # unsigned → bearer fallback
+    other = _auth(client, "CX014")
+    assert client.get(bare, headers=other).status_code == 403
+    assert client.get(bare, headers=h).status_code == 200
+
+
+def test_config_exposes_demo_flag(client, monkeypatch):
+    from backend import config
+    assert client.get("/api/driver/v1/config").get_json()["demo"] is True
+    monkeypatch.setattr(config, "SEED_DEMO", False)
+    assert client.get("/api/driver/v1/config").get_json()["demo"] is False
+
+
+def test_undeclared_env_under_gunicorn_is_production_like():
+    """DRIVER_APP_ENV forgotten + gunicorn serving → production-like: demo
+    credentials are never seeded. Declaring the env always wins."""
+    import importlib
+    from backend import config as cfg
+    saved = {k: os.environ.get(k) for k in
+             ("DRIVER_APP_ENV", "SERVER_SOFTWARE", "DRIVER_APP_SEED_DEMO")}
+    try:
+        os.environ.pop("DRIVER_APP_ENV", None)
+        os.environ.pop("DRIVER_APP_SEED_DEMO", None)
+        os.environ["SERVER_SOFTWARE"] = "gunicorn/21.2.0"
+        importlib.reload(cfg)
+        assert cfg.IS_PRODUCTION_LIKE is True
+        assert cfg.SEED_DEMO is False
+        os.environ["DRIVER_APP_ENV"] = "development"    # declared env wins
+        importlib.reload(cfg)
+        assert cfg.IS_PRODUCTION_LIKE is False
+        assert cfg.SEED_DEMO is True
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        importlib.reload(cfg)
+
+
+def test_run_date_filter(client):
+    h = _auth(client)
+    assert len(client.get("/api/driver/v1/run?date=2026-06-26", headers=h).get_json()["jobs"]) == 2
+    assert client.get("/api/driver/v1/run?date=1999-01-01", headers=h).get_json()["jobs"] == []
+    # Non-ISO values ('today', junk) keep the historic no-filter behaviour.
+    assert len(client.get("/api/driver/v1/run?date=today", headers=h).get_json()["jobs"]) == 2

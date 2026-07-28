@@ -251,3 +251,39 @@ def test_ops_console_page_served(client):
     r = client.get("/ops")
     assert r.status_code == 200
     assert b"TOM Dispatch" in r.data
+
+# ── QA-audit hardening fixes (July 2026) ──────────────────────────────
+
+def test_driver_reply_joins_per_job_thread(client):
+    """The driver can tag a reply with a docket, and the ops per-job thread
+    shows it — the chat round-trips both ways."""
+    oh = _ops(client)
+    dh = _driver(client)
+    d = "XM-20260626-0042"
+    client.post(OPS + "/messages/DRV001", json={"text": "Any ETA on this one?", "docket": d}, headers=oh)
+    r = client.post(DRV + "/messages", json={"text": "10 minutes out", "docket_number": d}, headers=dh)
+    assert r.status_code == 200
+    thread = client.get(OPS + f"/messages/DRV001?docket={d}", headers=oh).get_json()["messages"]
+    assert any(m["direction"] == "driver" and m["text"] == "10 minutes out" for m in thread)
+    # An untagged reply stays out of the per-job thread but is in the full one.
+    client.post(DRV + "/messages", json={"text": "general note"}, headers=dh)
+    thread = client.get(OPS + f"/messages/DRV001?docket={d}", headers=oh).get_json()["messages"]
+    assert not any(m["text"] == "general note" for m in thread)
+    full = client.get(OPS + "/messages/DRV001", headers=oh).get_json()["messages"]
+    assert any(m["text"] == "general note" for m in full)
+
+
+def test_tracking_snapshot_flags_stale_fixes(client):
+    """Seeded fixes are timestamped 'now' → fresh; a driver whose last fix is
+    old is flagged stale so the map never presents it as live."""
+    h = _ops(client)
+    snap = client.get(OPS + "/tracking", headers=h).get_json()["drivers"]
+    assert snap, "expected seeded fixes on the map"
+    fresh = {s["driver_id"]: s for s in snap}
+    assert fresh["DRV001"]["stale"] is False
+    from backend.db import get_connection
+    get_connection().execute(
+        "UPDATE locations SET recorded_at = '2026-01-01T00:00:00Z' WHERE driver_id = 'DRV001'")
+    get_connection().commit()
+    snap = client.get(OPS + "/tracking", headers=h).get_json()["drivers"]
+    assert {s["driver_id"]: s for s in snap}["DRV001"]["stale"] is True
