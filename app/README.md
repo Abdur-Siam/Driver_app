@@ -21,6 +21,7 @@ Driver/app
 │   ├── ops_auth.py   ops-console account verify + bearer tokens (separate)
 │   ├── ops_store.py  dispatch reads/writes: roster, tracking, jobs, chat
 │   ├── ops_api.py    /api/ops/v1/* blueprint (dispatch console)
+│   ├── bridge.py     TOM bridge — durable driver-event push (env-gated OFF)
 │   └── server.py     app factory (serves both APIs + PWA + console + media)
 ├── frontend/         installable PWA (vanilla JS — no build step)
 │   ├── index.html  app.js  styles.css        driver app
@@ -33,7 +34,7 @@ Driver/app
 ├── tools/make_icons.py        pure-Python PNG icon generator (no libs)
 ├── tools/provision_driver.py  create/manage real driver accounts (production)
 ├── tools/provision_ops.py     create/manage ops-console operators (production)
-├── tests/test_api.py 67 driver tests · tests/test_ops.py 23 console tests
+├── tests/  test_api.py 98 driver · test_ops.py 32 console · test_bridge.py 9 bridge
 ├── serve.py  run.sh  requirements.txt          local/dev entry
 ├── wsgi.py  gunicorn.conf.py  requirements-prod.txt   production entry
 └── data/             created at runtime (driver_app.db, media/)
@@ -46,8 +47,9 @@ The app runs on **both platforms two ways**:
 1. **Installable PWA (works today, no build).** Open the URL in **Chrome (Android)**
    or **Safari (iOS)** and install it: Android shows a one-tap *Install* prompt;
    iOS shows an in-app *Add to Home Screen* guide. It then runs full-screen with
-   an app icon, safe-area/notch handling, no pinch-zoom, offline shell, and a
-   theme-coloured status bar — indistinguishable from a native app for daily use.
+   an app icon, safe-area/notch handling, offline shell, and a theme-coloured
+   status bar. Pinch-zoom stays enabled (accessibility), and there is an in-app
+   **text-size setting** (normal / large / extra) under Me → App & display.
 2. **Native store apps (when you're ready to ship).** `native/` wraps the *same*
    frontend with **Capacitor** into Xcode (iOS) and Android Studio projects for
    the App Store / Play Store, unlocking **background GPS, push (FCM/APNs),
@@ -77,7 +79,10 @@ the driver app. **Demo login: `ops` / `ops1234`.** It provides:
   canvas map, zero external dependencies; a Google/OSM tile layer is a later config add).
 * **Jobs** — create + assign/reassign/unassign + cancel jobs, monitor lifecycle and
   per-drop progress. Creating/assigning a job pushes it straight onto the driver's run
-  and notifies them; cancelling removes it and messages the driver.
+  and notifies them; cancelling removes it and messages the driver. Unassigned jobs can
+  also be **offered**: the driver gets a countdown (default 120 s) to accept or decline,
+  and a decline/expiry returns the job to the unassigned board flagged with the outcome
+  and the driver's reason.
 * **Drivers** — roster with live duty/shift/last-fix/active-job/unread-message status
   (bank/PII deliberately never surfaced to dispatch).
 * **Chat** — two-way ops↔driver messaging, optionally tagged to a job (per-job chat).
@@ -92,7 +97,7 @@ console mutation writes an `ops_audit` row.
 
 ```bash
 cd Driver/app
-PYTHONPATH=. python3 -m pytest tests/ -q     # 90 passed (67 driver + 23 console)
+PYTHONPATH=. python3 -m pytest tests/ -q     # 139 passed (98 driver + 32 console + 9 bridge)
 ```
 
 ## Run it in production
@@ -144,7 +149,9 @@ See [../06_Route_Optimisation_Google_Maps.md](../06_Route_Optimisation_Google_Ma
 
 `POST /api/driver/v1/auth/login` · `/auth/logout` · `GET /me` · `GET /run` ·
 `GET /jobs/<docket>` · `POST /jobs/<docket>/status` · `/scan` · `/pod` · `/fail` ·
-`POST /location/batch` · `POST /route/optimise` · `GET|POST /messages` · `GET /config`.
+`POST /jobs/<docket>/drops/<seq>/arrive` · `GET /offers` · `POST /offers/<id>/accept` ·
+`POST /offers/<id>/decline` · `POST /location/batch` · `POST /route/optimise` ·
+`GET|POST /messages` · `POST /shift/vehicle-check` · `GET /config`.
 
 All mutating calls accept `X-Idempotency-Key` (offline-outbox replay). Auth is a
 bearer token (`Authorization: Bearer …`), one active device per driver, SHA-256
@@ -155,8 +162,15 @@ hashed at rest. Full contract: [../03_TOM_Integration_API_Contract.md](../03_TOM
 **Real and working now:**
 - **Operations:** token auth + device binding, Home dashboard, today's run, the full
   job lifecycle, barcode scan-match with wrong-drop/duplicate/unexpected guards,
-  signature + photo POD, failure capture, live geolocation streaming, offline outbox
-  with idempotent replay, installable offline PWA, audit trail, **job history**.
+  signature + photo POD (**with capture GPS persisted per drop**), a per-drop
+  **Arrived** stage (audited waypoint before the POD flow; ordering enforced
+  server-side), failure capture (photo in its own `fail_photo` column; legacy rows
+  stay readable), live geolocation streaming, offline outbox with idempotent replay,
+  installable offline PWA, audit trail, **job history with tappable detail** —
+  status, stops and the full POD (signature/photos via signed URLs) re-accessible
+  per completed job. The run list **self-refreshes** (gentle 30 s poll while on
+  shift + on app-visibility change) and surfaces incoming **job offers** with a
+  live accept/decline countdown.
 - **Per-job barcode scanning (`requires_scan`):** scanning is not universal — each job
   declares whether it needs it. Scan-required jobs are hard-gated server-side (POB blocked
   until all parcels collect-scanned; each drop's POD blocked until its parcels are
@@ -171,8 +185,13 @@ hashed at rest. Full contract: [../03_TOM_Integration_API_Contract.md](../03_TOM
   feeds GPS, scan and drop events back so the next re-optimisation has fresh inputs.
 - **Shift & availability** (modelled on the legacy ECHO driver app): **start shift with an
   end-time** so dispatch can pre-allocate, live shift **countdown**, **Available / Going
-  home** status, end shift; **quick canned messages** to ops (Heavy traffic, Where should I
-  plot?, **EMERGENCY**, Accident/breakdown — with confirm) plus free text.
+  home / On break** status (break time is accumulated on the shift and excluded from
+  worked-time maths), a **vehicle inspection checklist** at shift start (odometer + six
+  pass/fail items + defect note/photo; defects flag to ops via the message channel but
+  never block the shift), and an **end-of-shift summary** (duty/break/worked time, jobs
+  completed, drops delivered/failed, GPS distance, earnings); **quick canned messages**
+  to ops (Heavy traffic, Where should I plot?, **EMERGENCY**, Accident/breakdown — with
+  confirm) plus free text.
 - **App preferences:** **Day / Night / Auto** theme, **navigation app** choice (Google /
   Android native / Waze / HERE WeGo), **connection-lost sound alert**, notification
   toggles, fingerprint-login toggle.
@@ -204,7 +223,8 @@ hashed at rest. Full contract: [../03_TOM_Integration_API_Contract.md](../03_TOM
   and **native hardware scanner** (engage in the native build); **About/version** + Terms/Privacy.
 
 Endpoints added for the above: `/home /profile (GET/POST) /profile/password /earnings
-/statements /statements/<id> /statements/<id>/pdf /tax /performance /payout /expenses`.
+/statements /statements/<id> /statements/<id>/pdf /tax /performance /payout /expenses
+/offers /offers/<id>/accept|decline /jobs/<docket>/drops/<seq>/arrive /shift/vehicle-check`.
 
 **Production hardening (documented, not in this local build):**
 * **Native wrapper (Capacitor)** — *scaffolded* in [native/](native/) for *background*
@@ -221,6 +241,12 @@ Endpoints added for the above: `/home /profile (GET/POST) /profile/password /ear
   button (Settings → App & display), and `POST /push/test`. Ops→driver messages raise a
   push automatically. To go live: create a Firebase project, `pip install google-auth`,
   set `FCM_PROJECT_ID` + `FCM_CREDENTIALS_JSON` — queued pushes flush on boot.
+* **TOM bridge (built; env-gated OFF):** `backend/bridge.py` pushes driver events to
+  TOM — lifecycle transitions, POD, failed deliveries, GPS batches and barcode scans —
+  through a durable `bridge_outbox` (attempts / backoff / dead-letter, multi-worker-safe
+  claims, stdlib-only HTTP). Enable with `BRIDGE_ENABLED=1 TOM_BRIDGE_URL=… TOM_BRIDGE_KEY=…`;
+  events POST to `{TOM_BRIDGE_URL}/api/driver-bridge/v1/{status,pod,locations,scans}` with
+  an `X-TOM-Bridge-Key` header. TOM's receiving endpoints are the merge-side counterpart.
 * **Deploy-time only:** repoint signed-media storage at a cloud bucket (S3/GCS pre-signed
   URLs — `storage.sign_media_ref` is the single seam), TLS/cert-pinning, and the formal
   DPIA. The in-app consent flow, access-controlled media, data-rights requests and version

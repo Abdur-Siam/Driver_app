@@ -60,8 +60,10 @@ Supporting:
 
 **Runnable build (the actual app):**
 - [app/](app/) — a complete, self-contained, locally-runnable driver app (Flask backend +
-  installable PWA). `cd Driver/app && ./run.sh` → http://127.0.0.1:5179 (demo: `DRV001` / `test1234`).
-  17 backend tests pass; verified end-to-end (login → run → scan → POB → deliver → signature POD).
+  installable PWA) plus the `/ops` dispatch console. `cd Driver/app && ./run.sh` →
+  http://127.0.0.1:5179 (demo: `DRV001` / `test1234`; console `ops` / `ops1234`).
+  139 backend tests pass (98 driver + 32 console + 9 TOM-bridge); verified end-to-end
+  (login → run → arrive → scan → POB → deliver → signature POD → shift summary).
   See [app/README.md](app/README.md).
 - [../HANDOFF_Driver_App.md](../HANDOFF_Driver_App.md) — merge-into-TOM mapping, the proven
   integration seam, the `web/app.py` SHA-pin governance note, and the production-hardening list.

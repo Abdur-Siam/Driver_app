@@ -1,8 +1,10 @@
 # TOM Driver App — Full Report
 
 **Xtra Mile Couriers · driver-facing application for the TOM platform**
-Status: feature-complete standalone build, v1.0.0 · 46 backend tests green · not yet merged/deployed
-Report date: 26 June 2026
+Status: feature-complete standalone build · 139 backend tests green · not yet merged/deployed
+Report date: 26 June 2026 · updated 28 July 2026 (commercial-readiness wave: arrived-at-drop,
+offers, breaks + shift summary, vehicle checklist, history POD re-access, text-size
+accessibility, TOM bridge)
 
 ---
 
@@ -39,7 +41,7 @@ layer (C2c) existing before it connects to real fleet data.
 | Icons | **Pure-Python PNG encoder** | `tools/make_icons.py` (zlib only) — apple-touch + maskable |
 | Routing | **Google Routes API** + haversine fallback (server); haversine on device | See §5 |
 | Auth | Bearer tokens, **SHA-256 hashed at rest**, one device per driver | scrypt/pbkdf2 passwords |
-| Tests | **pytest — 46 backend tests** | Run on SQLite; designed to pass on Postgres after merge |
+| Tests | **pytest — 139 backend tests** | Run on SQLite; designed to pass on Postgres after merge |
 
 **Dependencies:** Flask + Werkzeug only on the backend; **zero** third-party JS
 on the frontend. This keeps the attack surface small and the merge clean.
@@ -54,18 +56,22 @@ on the frontend. This keeps the attack surface small and the merge clean.
 - **Token login** with device binding (one active device per driver).
 - **Home dashboard** — next job, run summary, shift state, unread messages, performance snapshot.
 - **Today's run** — jobs in dispatch-optimised order, sequence numbers, deadlines, **per-stop ETAs**.
-- **Full job lifecycle** — assigned → acknowledged → en-route pickup → at pickup → POB → en-route drop → delivered, each transition audited.
+- **Full job lifecycle** — assigned → acknowledged → en-route pickup → at pickup → POB → en-route drop → **arrived at drop** → delivered, each transition audited (per-drop arrival is an optional, ordering-enforced waypoint; it never resolves the drop).
+- **Job offers** — dispatch can offer a job instead of assigning it: the driver gets an offer card with a **live countdown** (default 120 s), Accept joins the run, Decline (with optional reason) or expiry returns the job to the ops board flagged with the outcome. Poll-driven — no push dependency.
 - **Barcode scanning** with **scan-match guards**: expected / duplicate / unexpected / **wrong-drop** detection on both collect and deliver; proof-of-board enforced before POB.
-- **Proof of delivery per drop** — recipient name, **on-canvas signature**, and **multiple delivery photos** (camera or gallery), viewable back on the delivered drop.
-- **Failure capture** — reason codes (no access, refused, damaged, wrong address, other) + note + photo.
+- **Proof of delivery per drop** — recipient name, **on-canvas signature**, and **multiple delivery photos** (camera or gallery), viewable back on the delivered drop; the **capture GPS position is persisted** with each POD (validated; junk coordinates store NULL, never a fake fix).
+- **Failure capture** — reason codes (no access, refused, damaged, wrong address, other) + note + photo (stored in its own `fail_photo` column; pre-migration rows that misfiled it in `pod_photo` remain readable).
 - **Live location streaming** — batched GPS pings (consent-gated, see §6).
 - **Turn-by-turn hand-off** to Google Maps / Waze / HERE WeGo / Android native (driver's choice).
-- **Job history** of completed work.
+- **Job history** of completed work — cards open a **detail view** with status, stops and the full POD (recipient, time, signature/photos via short-lived signed URLs, failure reasons), so proof is re-accessible after the day ends.
+- **Run-list polling** — a gentle 30 s refresh while on shift plus an immediate refresh when the app regains visibility; never fires on form screens or under an open modal, so in-progress work is not stomped.
 
 ### 3.2 Shift & availability (modelled on the legacy ECHO app)
 - **Start shift with an end-time** so dispatch can pre-allocate pre-bookings, with duration presets.
 - **Live shift countdown** in the header.
-- **Available / Going home** status (Going home signals dispatch to send only homeward jobs).
+- **Available / Going home / On break** status (Going home signals dispatch to send only homeward jobs; break time accumulates on the shift row and is excluded from worked-time maths).
+- **Vehicle inspection checklist at shift start** — odometer + six pass/fail items (tyres, lights, bodywork, load area, oil/coolant, wipers/washers) + defect note and optional photo. Advisory by design: defects flag to ops through the message channel but never block the shift.
+- **End-of-shift summary** — duty/break/worked minutes, jobs completed, drops delivered/failed, GPS distance for the shift (honest 0.0 when tracking was off) and earnings on jobs completed in the window.
 - **Quick canned messages** to ops — Heavy traffic, "Where should I plot?", **EMERGENCY**, Accident/breakdown (with confirm) — plus free text.
 
 ### 3.3 Pay (advanced, driver-pay focused)
@@ -86,7 +92,7 @@ on the frontend. This keeps the attack surface small and the merge clean.
 ### 3.5 App experience
 - **Day / Night / Auto theme.**
 - **Connection-lost sound alert** + offline banner.
-- **Installable** with home-screen icon, full-screen, safe-area/notch handling, no pinch-zoom.
+- **Installable** with home-screen icon, full-screen, safe-area/notch handling. Pinch-zoom is **enabled** (accessibility) and a **text-size setting** (normal / large / extra) scales the readable text via a root font-size class + rem sizing, persisted like the theme.
 - **Consistent back button** on every sub-page; 5-tab bottom nav (Home / Run / Pay / Inbox / Me).
 
 ---
@@ -167,7 +173,8 @@ keys are added later by the operator (one IP-restricted server key, one app-rest
 **Two delivery modes, one codebase:**
 1. **Installable PWA (works today):** Android shows a one-tap Install prompt; iOS shows an
    Add-to-Home-Screen guide. Runs full-screen with an app icon, notch/safe-area handling,
-   no zoom, offline shell, themed status bar — native-feeling for daily use.
+   offline shell, themed status bar — native-feeling for daily use (pinch-zoom kept
+   enabled, plus an in-app text-size setting).
 2. **Native store apps (scaffolded):** `Driver/app/native/` wraps the same frontend with
    **Capacitor** into Xcode/Android Studio projects, unlocking **background GPS, push (FCM/APNs),
    hardware barcode scanning and Face/Touch ID** via `native-bridge.js`. The web app calls these
@@ -183,19 +190,33 @@ Token-authenticated JSON; mutating calls honour `X-Idempotency-Key`; every state
 
 `config · health · auth/login · auth/logout · me · run · jobs/<docket> ·
 jobs/<docket>/status · jobs/<docket>/scan · jobs/<docket>/pod · jobs/<docket>/fail ·
+jobs/<docket>/drops/<seq>/arrive · offers (GET) · offers/<id>/accept · offers/<id>/decline ·
 location/batch · route/optimise · messages (GET/POST) · home · profile (GET/POST) ·
 profile/password · profile/photo · earnings · statements · statements/<id> ·
-statements/<id>/pdf · tax · performance · payout · expenses (GET/POST) · shift (GET/start/end) ·
-status · history · consent/location · push/register · account/data-request`
+statements/<id>/pdf · tax · performance · payout · expenses (GET/POST) ·
+shift (GET/start/end) · shift/vehicle-check · status · history · consent/location ·
+push/register · account/data-request`
+
+Ops side (`/api/ops/v1`) adds `jobs/<docket>/offer` next to assign/cancel.
+
+**TOM bridge (env-gated OFF by default):** with `BRIDGE_ENABLED=1` + `TOM_BRIDGE_URL` +
+`TOM_BRIDGE_KEY` set, `backend/bridge.py` durably queues lifecycle/POD/failure/location/scan
+events in `bridge_outbox` and POSTs them to
+`{TOM_BRIDGE_URL}/api/driver-bridge/v1/{status,pod,locations,scans}` with an
+`X-TOM-Bridge-Key` header (stdlib urllib, 5 s timeout; 2xx sent · 4xx dead with body logged ·
+5xx/network exponential backoff, dead after 8 attempts; multi-worker-safe claims).
 
 ---
 
 ## 9. Testing & verification
 
-- **46 backend tests (pytest), all green** — auth/lockout, ownership, lifecycle, scan guards,
-  idempotency, POD completion + multi-photo, location consent gate, route fallback, earnings,
-  statements + PDF, tax, expenses, payout, shift, history, signed/driver-scoped media,
-  push register, data requests, security headers, payload cap.
+- **139 backend tests (pytest), all green** — auth/lockout, ownership, lifecycle, scan guards,
+  idempotency, POD completion + multi-photo + GPS, arrived-at-drop ordering, offers
+  (accept/decline/expiry/withdrawal/ownership), breaks + shift summary, vehicle checklist,
+  fail-photo migration fallback, location consent gate, route fallback, earnings,
+  statements + PDF, tax, expenses, payout, shift, history POD re-access,
+  signed/driver-scoped media, push register + outbox claims, TOM-bridge enqueue/drain
+  contract, data requests, security headers, payload cap, text-size persistence.
 - **Verified live in-browser** throughout: login, run with ETAs, scan, signature+photo POD,
   offline→fallback→reconnect routing, earnings, PDF statements, settings, photo upload,
   consent flow, security headers + lockout (curl), CSP non-breaking, no console errors.
@@ -211,7 +232,7 @@ status · history · consent/location · push/register · account/data-request`
 | Frontend engineering | **High** — installable PWA, offline outbox, cross-platform |
 | Backend (standalone) | **High** — clean API, audited, 46 tests; stand-in for TOM |
 | App-side security/GDPR | **High** — headers, consent, scoped media, lockout, audit |
-| Integration with fleet | **Low** — not yet wired to TOM PostgreSQL/auth (depends on TOM C2c) |
+| Integration with fleet | **Low** — not yet wired to TOM PostgreSQL/auth (depends on TOM C2c); the driver→TOM **event bridge is built and tested but env-gated OFF** (TOM-side receiving endpoints are merge work) |
 | Native binaries | **Scaffolded** — needs Xcode/Android Studio to compile |
 | Production/deploy | **Pending** — TLS, push send, cloud storage, monitoring, pen-test |
 
