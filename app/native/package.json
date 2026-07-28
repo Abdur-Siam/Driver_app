@@ -1,0 +1,33 @@
+{
+  "name": "tom-driver-native",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Capacitor wrapper that packages the TOM Driver PWA into native iOS + Android apps.",
+  "scripts": {
+    "sync": "cap sync",
+    "copy": "cap copy",
+    "open:ios": "cap open ios",
+    "open:android": "cap open android",
+    "run:ios": "cap run ios",
+    "run:android": "cap run android",
+    "build:android": "cd android && ./gradlew assembleRelease",
+    "doctor": "cap doctor"
+  },
+  "dependencies": {
+    "@capacitor/core": "^6.1.0",
+    "@capacitor/ios": "^6.1.0",
+    "@capacitor/android": "^6.1.0",
+    "@capacitor/app": "^6.0.0",
+    "@capacitor/status-bar": "^6.0.0",
+    "@capacitor/splash-screen": "^6.0.0",
+    "@capacitor/network": "^6.0.0",
+    "@capacitor/geolocation": "^6.0.0",
+    "@capacitor/push-notifications": "^6.0.0",
+    "@capacitor-community/background-geolocation": "^1.2.20",
+    "@capacitor-mlkit/barcode-scanning": "^6.1.0",
+    "capacitor-native-biometric": "^4.2.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.0"
+  }
+}

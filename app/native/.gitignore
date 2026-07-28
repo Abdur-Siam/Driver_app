@@ -1,0 +1,19 @@
+# The ios/ and android/ projects ARE committed: they carry hand-added
+# store-review permission strings (Info.plist / AndroidManifest.xml).
+# Only dependencies, build outputs and copied web assets are ignored.
+node_modules/
+package-lock.json
+.DS_Store
+
+# Build outputs + local config
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+ios/App/Pods/
+ios/App/App.xcworkspace/xcuserdata/
+ios/App/App.xcodeproj/xcuserdata/
+
+# Copied web assets — regenerate with `npx cap copy`
+android/app/src/main/assets/public/
+ios/App/App/public/

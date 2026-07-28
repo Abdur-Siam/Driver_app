@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Live app data (secrets, DB with real GPS trails + PII, media)
+app/data/
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+
+# Node / native build output
+node_modules/
+app/native/ios/App/Pods/
+app/native/ios/App/build/
+app/native/android/.gradle/
+app/native/android/build/
+app/native/android/app/build/
+app/native/android/local.properties
+app/native/**/xcuserdata/
+app/native/android/app/src/main/assets/public/
+app/native/ios/App/App/public/
+
+# OS
+.DS_Store
+
+# FCM / service-account credentials
+*service-account*.json
+*serviceAccount*.json
+app/secrets/

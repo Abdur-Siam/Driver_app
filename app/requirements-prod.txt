@@ -1,0 +1,5 @@
+# Driver App — production deploy (adds serving + push transport to the base).
+-r requirements.txt
+gunicorn>=22.0
+google-auth>=2.0     # FCM HTTP v1 OAuth2 signing (push goes live when
+                     # FCM_PROJECT_ID + FCM_CREDENTIALS_JSON are set)

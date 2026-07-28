@@ -1,0 +1,36 @@
+require_relative '../../node_modules/@capacitor/ios/scripts/pods_helpers'
+
+platform :ios, '13.0'
+use_frameworks!
+
+# workaround to avoid Xcode caching of Pods that requires
+# Product -> Clean Build Folder after new Cordova plugins installed
+# Requires CocoaPods 1.6 or newer
+install! 'cocoapods', :disable_input_output_paths => true
+
+def capacitor_pods
+  pod 'Capacitor', :path => '../../node_modules/@capacitor/ios'
+  pod 'CapacitorCordova', :path => '../../node_modules/@capacitor/ios'
+  pod 'CapacitorApp', :path => '../../node_modules/@capacitor/app'
+  pod 'CapacitorStatusBar', :path => '../../node_modules/@capacitor/status-bar'
+  pod 'CapacitorSplashScreen', :path => '../../node_modules/@capacitor/splash-screen'
+  pod 'CapacitorNetwork', :path => '../../node_modules/@capacitor/network'
+  pod 'CapacitorGeolocation', :path => '../../node_modules/@capacitor/geolocation'
+  pod 'CapacitorPushNotifications', :path => '../../node_modules/@capacitor/push-notifications'
+  pod 'CapacitorCommunityBackgroundGeolocation', :path => '../../node_modules/@capacitor-community/background-geolocation'
+  # ML Kit 4.x ships no arm64-simulator slice, and iOS 26 simulators dropped
+  # Rosetta — so Apple-Silicon *simulator* builds must skip the scanner pod
+  # (`SKIP_MLKIT=1 pod install`). Device/App Store builds keep it; the JS
+  # bridge falls back to manual entry when the plugin is absent.
+  pod 'CapacitorMlkitBarcodeScanning', :path => '../../node_modules/@capacitor-mlkit/barcode-scanning' unless ENV['SKIP_MLKIT'] == '1'
+  pod 'CapacitorNativeBiometric', :path => '../../node_modules/capacitor-native-biometric'
+end
+
+target 'App' do
+  capacitor_pods
+  # Add your Pods here
+end
+
+post_install do |installer|
+  assertDeploymentTarget(installer)
+end

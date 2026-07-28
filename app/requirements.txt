@@ -1,0 +1,6 @@
+# Standalone Driver App backend — minimal, dependency-light.
+# (The route optimiser calls Google Maps via urllib; no SDK needed.)
+Flask>=3.0
+Werkzeug>=3.0
+# Dev/test:
+pytest>=8.0

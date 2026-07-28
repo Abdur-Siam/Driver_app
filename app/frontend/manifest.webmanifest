@@ -1,0 +1,24 @@
+{
+  "name": "TOM Driver",
+  "short_name": "TOM Driver",
+  "description": "Xtra Mile Couriers driver app — run, scan, deliver.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "fullscreen", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#0E1623",
+  "theme_color": "#0E1623",
+  "categories": ["business", "productivity", "navigation"],
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Today's run", "short_name": "Run", "url": "/#/run" },
+    { "name": "Earnings", "short_name": "Pay", "url": "/#/earnings" }
+  ]
+}

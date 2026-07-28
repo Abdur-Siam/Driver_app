@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+
+  <!-- Theme colour follows the active scheme (night default, day in light mode) -->
+  <meta name="theme-color" content="#0E1623" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#F4F6FA" media="(prefers-color-scheme: light)" />
+
+  <!-- Android / Chrome installable PWA -->
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="application-name" content="TOM Driver" />
+
+  <!-- iOS / Safari standalone web app -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="TOM Driver" />
+  <meta name="format-detection" content="telephone=no" />
+
+  <title>TOM Driver</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+
+  <!-- Icons: SVG for capable browsers, PNG apple-touch for iOS home screen -->
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <link rel="apple-touch-icon" sizes="152x152" href="/icons/icon-152.png" />
+  <link rel="apple-touch-icon" sizes="167x167" href="/icons/icon-167.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
+
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="app" aria-live="polite"></div>
+
+  <!-- Toast / sync indicator -->
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/config.js"></script>
+  <script src="/native-bridge.js" defer></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>

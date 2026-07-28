@@ -1,0 +1,27 @@
+{
+  "appId": "uk.co.xtramile.tomdriver",
+  "appName": "TOM Driver",
+  "webDir": "../frontend",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https",
+    "iosScheme": "https"
+  },
+  "ios": {
+    "contentInset": "always",
+    "limitsNavigationsToAppBoundDomains": true
+  },
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    },
+    "SplashScreen": {
+      "launchAutoHide": true,
+      "backgroundColor": "#0E1623",
+      "showSpinner": false
+    }
+  }
+}
