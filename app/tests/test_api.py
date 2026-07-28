@@ -810,15 +810,17 @@ def test_push_flush_requeues_orphaned_claims(client, monkeypatch):
 # ── shared Google Maps key (same key as TOM: GOOGLE_MAPS_API_KEY) ────
 
 def test_shared_google_maps_key_fallback():
-    """When only the shared TOM key is set, BOTH the server-side and browser
-    keys resolve to it (the two split vars are unset)."""
+    """When the master switch is ON and only the shared TOM key is set, BOTH
+    the server-side and browser keys resolve to it (split vars unset)."""
     import importlib
     from backend import config as cfg
     saved = {k: os.environ.get(k) for k in
-             ("GOOGLE_MAPS_API_KEY", "GOOGLE_MAPS_SERVER_KEY", "GOOGLE_MAPS_BROWSER_KEY", "TOM_PUBLIC_ORIGIN")}
+             ("GOOGLE_MAPS_API_KEY", "GOOGLE_MAPS_SERVER_KEY", "GOOGLE_MAPS_BROWSER_KEY",
+              "TOM_PUBLIC_ORIGIN", "DRIVER_MAPS_ENABLED")}
     try:
         for k in saved:
             os.environ.pop(k, None)
+        os.environ["DRIVER_MAPS_ENABLED"] = "1"
         os.environ["GOOGLE_MAPS_API_KEY"] = "AIza-shared-tom-key"
         os.environ["TOM_PUBLIC_ORIGIN"] = "https://driver.example/"
         importlib.reload(cfg)
@@ -836,12 +838,14 @@ def test_shared_google_maps_key_fallback():
 
 
 def test_split_keys_take_precedence_over_shared():
-    """An operator can still supply dedicated split keys; they win."""
+    """An operator can still supply dedicated split keys; they win (switch on)."""
     import importlib
     from backend import config as cfg
-    keys = ("GOOGLE_MAPS_API_KEY", "GOOGLE_MAPS_SERVER_KEY", "GOOGLE_MAPS_BROWSER_KEY")
+    keys = ("GOOGLE_MAPS_API_KEY", "GOOGLE_MAPS_SERVER_KEY", "GOOGLE_MAPS_BROWSER_KEY",
+            "DRIVER_MAPS_ENABLED")
     saved = {k: os.environ.get(k) for k in keys}
     try:
+        os.environ["DRIVER_MAPS_ENABLED"] = "1"
         os.environ["GOOGLE_MAPS_API_KEY"] = "AIza-shared"
         os.environ["GOOGLE_MAPS_SERVER_KEY"] = "AIza-server-only"
         os.environ["GOOGLE_MAPS_BROWSER_KEY"] = "AIza-browser-only"
@@ -857,10 +861,15 @@ def test_split_keys_take_precedence_over_shared():
         importlib.reload(cfg)
 
 
-def test_routing_sends_referer_for_restricted_key(monkeypatch):
+def test_routing_sends_referer_for_restricted_key(tmp_path, monkeypatch):
     """The server-side Routes call must send the Referer that TOM's
-    referrer-restricted key requires, plus the shared key itself."""
-    from backend import routing, config as cfg
+    referrer-restricted key requires, plus the shared key itself.
+    (Needs a real DB: the fail-closed budget counter refuses the call
+    otherwise — which is the intended barrier behaviour.)"""
+    from backend import routing, db, config as cfg
+    monkeypatch.setattr(cfg, "DB_PATH", str(tmp_path / "t.db"))
+    db.close_connection()
+    db.init_db()
     monkeypatch.setattr(cfg, "GOOGLE_MAPS_SERVER_KEY", "AIza-shared")
     monkeypatch.setattr(cfg, "GOOGLE_MAPS_REFERER", "https://driver.example/")
     captured = {}

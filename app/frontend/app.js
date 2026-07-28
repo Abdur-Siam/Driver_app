@@ -518,7 +518,7 @@ async function optimise() {
   if (navigator.onLine) {
     toast('Optimising route…');
     const r = await mutate('/route/optimise', { from: pos ? { lat: pos.lat, lng: pos.lng } : {} });
-    if (r.ok) { toast(`Route set (${r.data.engine === 'google_routes' ? 'Google' : 'offline'}) · ${r.data.total_distance_km} km`); await loadRun(); render(); return; }
+    if (r.ok) { toast(`Route set (${(r.data.engine || '').startsWith('google_routes') ? 'Google' : 'offline'}) · ${r.data.total_distance_km} km`); await loadRun(); render(); return; }
     // call failed/queued → drop to on-device order so the driver isn't stuck
   }
   const { jobs, totalKm } = localOptimise(pos, S.run);

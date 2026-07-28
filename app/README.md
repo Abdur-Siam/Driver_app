@@ -121,20 +121,52 @@ are DB-backed, so any number of gunicorn workers share them safely. Full
 steps (VM, TLS, systemd, backups, go-live credentials):
 [../../TOM_DriverApp_Commercial_Deploy_Runbook_2026-07-13.md](../../TOM_DriverApp_Commercial_Deploy_Runbook_2026-07-13.md).
 
-## Google Maps — same key as TOM
+## Google Maps — DISCONNECTED by default (master switch)
 
-The app is **fully functional without a key** — routing falls back to a
+**As of 28 Jul 2026 the Google Maps connection is OFF by default** (Jeet's
+directive after a £415/month Places API bill on the shared Google account).
+The master switch is `DRIVER_MAPS_ENABLED`: unless it is explicitly `1`,
+every Google key resolves blank — even when `GOOGLE_MAPS_API_KEY` is present
+in the host environment — so the app makes **zero** Google calls, ships no
+key to the browser, and the CSP stays closed to Google hosts. Do not flip
+the switch until Jeet says so.
+
+The app is **fully functional disconnected** — routing falls back to a
 nearest-neighbour haversine order and the run screen shows a map placeholder.
 
-It uses **the same key as TOM**: the single, HTTP-referrer-restricted
-`GOOGLE_MAPS_API_KEY` (see `app/modules/google_maps.py`). Set that one var and both
-the server-side Routes optimisation and the in-app Maps JS use it:
+Cost barriers (active whenever the switch is later flipped on):
+
+* **One Google surface only.** The server-side Routes `computeRoutes` call in
+  `backend/routing.py` is the app's only outbound Google API; there is no
+  Places/Geocoding/Place Details usage anywhere, and `tests/test_maps_barriers.py`
+  guards against any creeping in (Places is the expensive SKU family —
+  requesting one Pro/Enterprise-tier field bills the whole call at that tier).
+* **Pinned Essentials field mask.** `ROUTES_FIELD_MASK` requests exactly three
+  route fields; the mask is test-pinned so a casual field addition (= a price
+  tier jump) fails the suite.
+* **Per-day hard cap.** `DRIVER_MAPS_DAILY_CAP` (default 200) is a DB-backed
+  counter (`maps_usage`) that survives restarts and **fails closed** — if the
+  counter can't be advanced, the Google call is not made.
+* **Route cache.** Results are cached 24 h (`maps_route_cache`,
+  `DRIVER_MAPS_CACHE_TTL_HOURS`) keyed on coordinates+dockets, so
+  re-optimising the same run is free. Coordinates/orderings only — no Places
+  content, so caching is within Google's terms.
+* **No per-render calls.** The run map is pins-only by design: no route
+  polyline (each would be a Directions call), no `libraries=` param on the
+  Maps JS loader (test-pinned).
+* **Recommended on reconnect:** set a per-API daily quota cap + billing budget
+  alert in the Cloud Console as the backstop above the app-level cap.
+
+When the switch IS on, it uses **the same key as TOM**: the single,
+HTTP-referrer-restricted `GOOGLE_MAPS_API_KEY` (see `app/modules/google_maps.py`):
 
 ```bash
+DRIVER_MAPS_ENABLED=1                             \
 GOOGLE_MAPS_API_KEY=<the TOM Maps Platform key>   \
 TOM_PUBLIC_ORIGIN=https://<driver-app-origin>/    \
 ./run.sh
 ```
+* **`DRIVER_MAPS_ENABLED`** → the master switch (default OFF = disconnected).
 * **`GOOGLE_MAPS_API_KEY`** → one key for Routes (server-side) + Maps JS (run screen).
 * **`TOM_PUBLIC_ORIGIN`** → the `Referer` sent on server-side Routes calls (TOM's key is
   referrer-restricted, so Google only honours REST calls whose Referer matches the key's

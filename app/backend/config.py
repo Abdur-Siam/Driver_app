@@ -82,19 +82,46 @@ TOKEN_TTL_HOURS = int(os.environ.get("DRIVER_APP_TOKEN_TTL_HOURS", "12"))
 # desk, so a longer default than the driver device token).
 OPS_TOKEN_TTL_HOURS = int(os.environ.get("DRIVER_APP_OPS_TOKEN_TTL_HOURS", "12"))
 
-# Google Maps Platform. TOM uses ONE key — the HTTP-referrer-restricted
-# GOOGLE_MAPS_API_KEY (see app/modules/google_maps.py) — for browser Maps JS
-# AND server-side REST (Places/Routes). The driver app shares that same key:
-#   * If GOOGLE_MAPS_API_KEY is set (the TOM key), BOTH the server-side Routes
-#     optimisation and the in-app Maps JS use it — one key, same as TOM.
-#   * The two legacy split vars still take precedence if explicitly set, so an
-#     operator who wants a dedicated IP-restricted server key / app-restricted
-#     browser key can still supply them.
-# When none is set the server falls back to a haversine route order and the
-# frontend renders a non-Google fallback map (app stays fully functional).
-GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
-GOOGLE_MAPS_SERVER_KEY = os.environ.get("GOOGLE_MAPS_SERVER_KEY", "").strip() or GOOGLE_MAPS_API_KEY
-GOOGLE_MAPS_BROWSER_KEY = os.environ.get("GOOGLE_MAPS_BROWSER_KEY", "").strip() or GOOGLE_MAPS_API_KEY
+# Google Maps Platform — DISCONNECTED BY DEFAULT (Jeet, 28 Jul 2026).
+#
+# MASTER SWITCH: DRIVER_MAPS_ENABLED. Unless it is explicitly "1"/"true"/
+# "yes", every Google Maps key below resolves to "" — even when
+# GOOGLE_MAPS_API_KEY is present in the environment (it will be, on any
+# host that shares TOM's app settings). With the switch off the app makes
+# ZERO Google Maps calls, ships no key to the browser, and the CSP stays
+# closed to Google hosts; routing falls back to haversine and the frontend
+# renders the non-Google map panel. Flip the switch only on Jeet's say-so.
+#
+# Key resolution (only when the switch is on) is unchanged from before:
+# TOM's single referrer-restricted GOOGLE_MAPS_API_KEY drives both the
+# server-side Routes call and the in-app Maps JS; the two split vars take
+# precedence when explicitly set (dedicated IP-restricted server key /
+# app-restricted browser key).
+#
+# Cost barriers (see routing.py): the server-side Routes call is the ONLY
+# Google API this app uses (there is no Places/Geocoding usage anywhere —
+# a guard test pins that). It is capped per day and cached; both knobs
+# below apply only once the master switch is on.
+DRIVER_MAPS_ENABLED = os.environ.get(
+    "DRIVER_MAPS_ENABLED", "").strip().lower() in ("1", "true", "yes")
+_RAW_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+if DRIVER_MAPS_ENABLED:
+    GOOGLE_MAPS_API_KEY = _RAW_MAPS_API_KEY
+    GOOGLE_MAPS_SERVER_KEY = os.environ.get("GOOGLE_MAPS_SERVER_KEY", "").strip() or GOOGLE_MAPS_API_KEY
+    GOOGLE_MAPS_BROWSER_KEY = os.environ.get("GOOGLE_MAPS_BROWSER_KEY", "").strip() or GOOGLE_MAPS_API_KEY
+else:
+    GOOGLE_MAPS_API_KEY = ""
+    GOOGLE_MAPS_SERVER_KEY = ""
+    GOOGLE_MAPS_BROWSER_KEY = ""
+
+# Hard daily ceiling on server-side Google Routes calls (fail-closed: when
+# the counter cannot be read/advanced, the call is NOT made). 0 disables
+# Google routing outright even with the switch on.
+MAPS_DAILY_CAP = int(os.environ.get("DRIVER_MAPS_DAILY_CAP", "200"))
+
+# Route-result cache TTL. Route orders for a fixed set of coordinates are
+# near-static — re-optimising the same run must not cost another call.
+MAPS_CACHE_TTL_HOURS = int(os.environ.get("DRIVER_MAPS_CACHE_TTL_HOURS", "24"))
 
 # TOM's key is referrer-restricted, so Google only honours server-side REST calls
 # whose Referer header matches the key's allow-list. We send this origin on the

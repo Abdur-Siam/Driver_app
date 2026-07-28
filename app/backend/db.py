@@ -416,6 +416,25 @@ SCHEMA = [
         created_at TEXT NOT NULL
     )
     """,
+    # ── Google Maps cost barriers (routing.py). maps_usage is the per-day
+    #    hard-cap counter for outbound Routes calls; maps_route_cache stores
+    #    optimisation results so identical runs never re-bill. Coordinates
+    #    and orderings only — nothing here is Places content, so caching is
+    #    within Google's terms. ────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS maps_usage (
+        day    TEXT PRIMARY KEY,               -- YYYY-MM-DD (UTC)
+        calls  INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS maps_route_cache (
+        cache_key    TEXT PRIMARY KEY,          -- sha256 of rounded coords + dockets
+        ordered_json TEXT NOT NULL,             -- JSON list of docket_numbers
+        distance_km  REAL,
+        created_at   TEXT NOT NULL
+    )
+    """,
     # ── TOM bridge outbox (durable driver→TOM event queue; env-gated OFF
     #    by default — see bridge.py for the delivery/backoff contract) ────
     """
