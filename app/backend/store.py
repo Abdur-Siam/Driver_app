@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from . import bridge
 from .db import get_connection
 
 
@@ -32,6 +33,19 @@ ACTION_ALIASES = {
     "arrived_pickup": "arrive_pickup", "pob": "collected",
     "depart_pickup": "en_route_drop", "start_delivery": "en_route_drop",
 }
+
+# Internal lifecycle action → TOM bridge event name ('acknowledge' is
+# app-internal and deliberately absent from the bridge enum).
+_BRIDGE_LIFECYCLE_EVENTS = {
+    "en_route_pickup": "en_route_pickup", "arrive_pickup": "arrived_pickup",
+    "collected": "pob", "en_route_drop": "en_route_drop",
+}
+
+
+def _callsign(driver_id) -> str:
+    row = get_connection().execute(
+        "SELECT callsign FROM drivers WHERE driver_id = ?", (driver_id,)).fetchone()
+    return row["callsign"] if row else str(driver_id)
 
 
 # ── Audit ────────────────────────────────────────────────────────────
@@ -280,6 +294,8 @@ def advance_lifecycle(docket, driver_id, action) -> Dict[str, Any]:
     )
     conn.commit()
     audit(driver_id, "lifecycle:" + act, docket, {"from": prev, "to": new_state})
+    if bridge.enabled() and act in _BRIDGE_LIFECYCLE_EVENTS:
+        bridge.enqueue_status(docket, _callsign(driver_id), _BRIDGE_LIFECYCLE_EVENTS[act])
     return {"ok": True, "previous": prev, "new": new_state}
 
 
@@ -344,15 +360,22 @@ def scan_parcel(docket, driver_id, drop_seq, phase, barcode, entry="scan",
     else:
         return {"ok": False, "reason": "invalid_phase"}
 
+    scanned_at = _now()
     conn.execute(
         "INSERT INTO parcel_events (event_id, docket_number, drop_seq, phase, barcode, "
         "entry, match_result, driver_id, recorded_at, lat, lng) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (str(uuid.uuid4()), docket, drop_seq, phase, barcode,
-         entry if entry in ("scan", "manual") else "scan", match, driver_id, _now(), lat, lng),
+         entry if entry in ("scan", "manual") else "scan", match, driver_id, scanned_at, lat, lng),
     )
     conn.commit()
     audit(driver_id, "scan:" + phase, docket,
           {"barcode": barcode, "match": match, "drop_seq": drop_seq})
+    if bridge.enabled():
+        bridge.enqueue_scans(docket, [{
+            "barcode": barcode, "event_type": phase,
+            "lat": _coord(lat, -90, 90), "lng": _coord(lng, -180, 180),
+            "scanned_at": scanned_at,
+        }])
 
     remaining = sum(1 for p in _parcels_for(docket) if p["state"] == "expected")
     return {"ok": True, "match": match, "parcel_state": parcel_state,
@@ -390,15 +413,21 @@ def capture_pod(docket, driver_id, drop_seq, recipient, signature_ref,
     pod_lat, pod_lng = _coord(lat, -90, 90), _coord(lng, -180, 180)
     if pod_lat is None or pod_lng is None:
         pod_lat = pod_lng = None
+    ts = _now()
     conn.execute(
         "UPDATE drops SET status='delivered', pod_recipient=?, pod_signature=?, "
         "pod_photo=?, pod_photos=?, pod_note=?, pod_at=?, pod_lat=?, pod_lng=? WHERE id=?",
         (recipient, signature_ref, photo_ref, json.dumps(photos) if photos else None,
-         note, _now(), pod_lat, pod_lng, row["id"]),
+         note, ts, pod_lat, pod_lng, row["id"]),
     )
     conn.commit()
     audit(driver_id, "pod", docket, {"drop_seq": drop_seq, "recipient": recipient})
     completed = _maybe_complete_job(docket, driver_id)
+    if bridge.enabled():
+        cs = _callsign(driver_id)
+        bridge.enqueue_status(docket, cs, "delivered", at=ts,
+                              meta={"drop_seq": drop_seq, "job_completed": completed})
+        bridge.enqueue_pod(docket, recipient, ts, pod_lat, pod_lng, signature_ref, photos)
     return {"ok": True, "drop_seq": drop_seq, "job_completed": completed}
 
 
@@ -416,14 +445,19 @@ def fail_drop(docket, driver_id, drop_seq, reason, note=None, photo_ref=None) ->
         return {"ok": False, "reason": "already_resolved"}
     # The failure photo has its own column (fail_photo). Rows written before it
     # existed carry the photo in pod_photo — readers fall back (see _project_job).
+    ts = _now()
     conn.execute(
         "UPDATE drops SET status='failed', fail_reason=?, fail_note=?, fail_photo=?, "
         "pod_at=? WHERE id=?",
-        (reason, note, photo_ref, _now(), row["id"]),
+        (reason, note, photo_ref, ts, row["id"]),
     )
     conn.commit()
     audit(driver_id, "fail", docket, {"drop_seq": drop_seq, "reason": reason})
     completed = _maybe_complete_job(docket, driver_id)
+    if bridge.enabled():
+        bridge.enqueue_status(docket, _callsign(driver_id), "failed", at=ts,
+                              meta={"drop_seq": drop_seq, "reason": reason,
+                                    "job_completed": completed})
     return {"ok": True, "drop_seq": drop_seq, "job_completed": completed}
 
 
@@ -456,6 +490,9 @@ def arrive_at_drop(docket, driver_id, drop_seq, lat=None, lng=None) -> Dict[str,
     conn.commit()
     audit(driver_id, "drop:arrived", docket,
           {"drop_seq": drop_seq, "lat": _coord(lat, -90, 90), "lng": _coord(lng, -180, 180)})
+    if bridge.enabled():
+        bridge.enqueue_status(docket, _callsign(driver_id), "arrived_drop", at=ts,
+                              meta={"drop_seq": drop_seq})
     return {"ok": True, "drop_seq": drop_seq, "arrived_at": ts}
 
 
@@ -486,6 +523,8 @@ def record_locations(driver_id, pings: List[Dict[str, Any]]) -> int:
     conn = get_connection()
     n = 0
     recv = _now()
+    bridging = bridge.enabled()
+    accepted = []          # newly-stored points, batched onward to TOM
     for p in pings:
         if not isinstance(p, dict):
             continue
@@ -507,7 +546,13 @@ def record_locations(driver_id, pings: List[Dict[str, Any]]) -> int:
              _numeric(p.get("acc")), _numeric(p.get("bat"))),
         )
         n += max(cur.rowcount, 0)  # count only rows actually inserted (0 if deduped)
+        if bridging and cur.rowcount > 0:
+            accepted.append({"lat": lat, "lng": lng,
+                             "recorded_at": p.get("t"), "ping_id": p.get("id")})
     conn.commit()
+    if accepted:
+        # One bridge event per accepted batch (deduped replays enqueue nothing).
+        bridge.enqueue_locations(_callsign(driver_id), accepted)
     return n
 
 

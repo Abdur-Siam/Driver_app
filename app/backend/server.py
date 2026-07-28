@@ -82,6 +82,13 @@ def create_app() -> Flask:
         if flushed["sent"] or flushed["failed"]:
             print(f"[driver-app] push outbox flushed: {flushed}", flush=True)
 
+    # TOM bridge (env-gated OFF): when enabled, drain the durable event
+    # outbox in the background (daemon thread per worker; see bridge.py).
+    from . import bridge
+    if bridge.enabled() and bridge.start_drainer():
+        print(f"[driver-app] TOM bridge enabled → {config.TOM_BRIDGE_URL} "
+              f"(outbox drainer started; {bridge.pending_count()} pending)", flush=True)
+
     # ── frontend (PWA) ───────────────────────────────────────────────
     @app.route("/")
     def index():
