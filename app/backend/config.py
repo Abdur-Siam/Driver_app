@@ -113,6 +113,16 @@ FCM_PROJECT_ID = os.environ.get("FCM_PROJECT_ID", "").strip()
 FCM_CREDENTIALS_JSON = (os.environ.get("FCM_CREDENTIALS_JSON", "").strip()
                         or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip())
 
+# Job-offer countdown: how long a dispatched offer stays open before it
+# expires back to the ops board (seconds; per-offer override clamped 15–3600).
+OFFER_TTL_S = int(os.environ.get("DRIVER_APP_OFFER_TTL_S", "120"))
+
+# TOM bridge (driver events → TOM), env-gated OFF by default. All three must
+# be set for the bridge to enqueue/deliver anything — see backend/bridge.py.
+BRIDGE_ENABLED = os.environ.get("BRIDGE_ENABLED", "").strip() == "1"
+TOM_BRIDGE_URL = os.environ.get("TOM_BRIDGE_URL", "").strip().rstrip("/")
+TOM_BRIDGE_KEY = os.environ.get("TOM_BRIDGE_KEY", "").strip()
+
 # Login throttle (per-IP sliding window) + per-account lockout (brute-force).
 LOGIN_RATE_MAX = int(os.environ.get("DRIVER_APP_LOGIN_RATE_MAX", "10"))
 LOGIN_RATE_WINDOW_S = int(os.environ.get("DRIVER_APP_LOGIN_RATE_WINDOW_S", "60"))

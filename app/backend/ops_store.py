@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from . import store
+from . import config, store
 from .auth import parse_iso
 from .db import get_connection
 
@@ -175,6 +175,7 @@ def _job_progress(docket) -> Dict[str, Any]:
 
 def list_jobs(status: str = "active", limit: int = 200) -> List[Dict[str, Any]]:
     """status: active | unassigned | completed | all."""
+    store.expire_offers()   # keep offer flags honest on every board read
     conn = get_connection()
     where, params = "", []
     status = (status or "active").lower()
@@ -198,12 +199,78 @@ def list_jobs(status: str = "active", limit: int = 200) -> List[Dict[str, Any]]:
         drv = store.get_driver(j["driver_id"]) if j.get("driver_id") else None
         j["driver_name"] = drv["name"] if drv else None
         j["progress"] = _job_progress(j["docket_number"])
+        # Offer state only matters on the unassigned board (declined/expired
+        # offers are exactly what a dispatcher must see and re-route).
+        j["offer"] = latest_offer(j["docket_number"]) if not j.get("driver_id") else None
         out.append(j)
     return out
 
 
 def job_full(docket) -> Optional[Dict[str, Any]]:
-    return store.get_job_admin(docket)
+    out = store.get_job_admin(docket)
+    if out is not None:
+        store.expire_offers()
+        out["offer"] = latest_offer(docket)
+    return out
+
+
+# ── Job offers (ops side) ────────────────────────────────────────────
+
+def offer_job(docket, driver_id, actor: str, expires_in_s=None) -> Dict[str, Any]:
+    """Offer an UNASSIGNED job to a driver with an accept-by countdown.
+    One live offer per job — re-offering withdraws the previous one."""
+    store.expire_offers()
+    conn = get_connection()
+    job = conn.execute("SELECT status, driver_id FROM jobs WHERE docket_number = ?",
+                       (docket,)).fetchone()
+    if not job:
+        return {"ok": False, "reason": "job_not_found"}
+    if job["status"] in ("COMPLETED", "CANCELLED"):
+        return {"ok": False, "reason": "job_closed"}
+    if job["driver_id"]:
+        return {"ok": False, "reason": "job_assigned"}
+    driver_id = (driver_id or "").strip()
+    drv = store.get_driver(driver_id) if driver_id else None
+    if not drv:
+        return {"ok": False, "reason": "driver_not_found"}
+    if not drv.get("active"):
+        return {"ok": False, "reason": "driver_inactive"}
+    try:
+        ttl = int(expires_in_s)
+    except (TypeError, ValueError):
+        ttl = config.OFFER_TTL_S
+    ttl = max(15, min(ttl if ttl > 0 else config.OFFER_TTL_S, 3600))
+    expires = (datetime.now(timezone.utc) + timedelta(seconds=ttl)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute("UPDATE offers SET status='withdrawn', responded_at=? "
+                 "WHERE docket_number=? AND status='pending'", (_now(), docket))
+    cur = conn.execute(
+        "INSERT INTO offers (docket_number, driver_id, status, offered_by, offered_at, expires_at) "
+        "VALUES (?,?,'pending',?,?,?)", (docket, driver_id, actor, _now(), expires))
+    conn.commit()
+    ops_audit(actor, "job:offer", docket,
+              {"driver_id": driver_id, "expires_at": expires, "ttl_s": ttl})
+    # Poll-driven by design; the push is a best-effort nudge (queues durably
+    # without FCM credentials, never a dependency).
+    from . import push
+    push.notify_driver(driver_id, "job", "New job offer",
+                       f"Job {docket} is on offer — open the app to accept before it expires.")
+    return {"ok": True, "offer_id": cur.lastrowid, "docket": docket,
+            "driver_id": driver_id, "expires_at": expires, "ttl_s": ttl}
+
+
+def latest_offer(docket) -> Optional[Dict[str, Any]]:
+    """Most recent offer for a docket (any state) — the board flag."""
+    row = get_connection().execute(
+        "SELECT * FROM offers WHERE docket_number = ? ORDER BY id DESC LIMIT 1", (docket,),
+    ).fetchone()
+    if not row:
+        return None
+    o = dict(row)
+    drv = store.get_driver(o["driver_id"])
+    return {"driver_id": o["driver_id"], "driver_name": drv["name"] if drv else None,
+            "status": o["status"], "offered_at": o["offered_at"],
+            "expires_at": o["expires_at"], "responded_at": o["responded_at"],
+            "decline_reason": o["decline_reason"]}
 
 
 _DOCKET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-]{2,39}$")

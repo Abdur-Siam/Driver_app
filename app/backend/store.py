@@ -578,6 +578,103 @@ def stops_for_routing(driver_id) -> List[Dict[str, Any]]:
     return out
 
 
+# ── Job offers (driver side) ─────────────────────────────────────────
+# Dispatch can OFFER a job instead of direct-assigning it: the driver gets a
+# countdown to accept or decline. Poll-driven by design (no FCM dependency):
+# expiry is applied lazily on every read/mutation, never by a daemon.
+
+def expire_offers() -> int:
+    """Flag pending offers past their deadline as expired. Returns count."""
+    conn = get_connection()
+    now = _now()
+    cur = conn.execute(
+        "UPDATE offers SET status='expired', responded_at=? "
+        "WHERE status='pending' AND expires_at <= ?", (now, now))
+    conn.commit()
+    return cur.rowcount
+
+
+def _offer_row(offer_id, driver_id) -> Optional[Dict[str, Any]]:
+    row = get_connection().execute(
+        "SELECT * FROM offers WHERE id = ? AND driver_id = ?", (offer_id, driver_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_offers(driver_id) -> List[Dict[str, Any]]:
+    """Live (pending, unexpired) offers with the job summary the offer card
+    shows. expires_in_s is server-computed so client clock skew can't lie."""
+    from .auth import parse_iso
+    expire_offers()
+    rows = get_connection().execute(
+        "SELECT * FROM offers WHERE driver_id = ? AND status = 'pending' ORDER BY id",
+        (driver_id,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        o = dict(r)
+        job = _job_row(o["docket_number"])
+        if not job:
+            continue
+        exp = parse_iso(o["expires_at"])
+        left = max(0, int((exp - datetime.now(timezone.utc)).total_seconds())) if exp else 0
+        out.append({
+            "offer_id": o["id"], "docket_number": o["docket_number"],
+            "offered_at": o["offered_at"], "expires_at": o["expires_at"],
+            "expires_in_s": left,
+            "account": job["account"], "vehicle": job["vehicle"],
+            "deadline": job["deadline"],
+            "pickup_postcode": job["pickup_postcode"], "pickup_address": job["pickup_address"],
+            "drops": len(_drops_for(o["docket_number"])),
+            "driver_pay_final": job["driver_pay_final"],
+        })
+    return out
+
+
+def accept_offer(driver_id, offer_id) -> Dict[str, Any]:
+    expire_offers()
+    o = _offer_row(offer_id, driver_id)
+    if not o:
+        return {"ok": False, "reason": "not_found"}
+    if o["status"] != "pending":
+        return {"ok": False, "reason": "offer_closed", "status": o["status"]}
+    conn = get_connection()
+    job = _job_row(o["docket_number"])
+    if (not job or job["status"] in ("COMPLETED", "CANCELLED")
+            or (job["driver_id"] and job["driver_id"] != driver_id)):
+        # Ops moved the job on while the offer was open — the offer is dead.
+        conn.execute("UPDATE offers SET status='withdrawn', responded_at=? WHERE id=?",
+                     (_now(), offer_id))
+        conn.commit()
+        return {"ok": False, "reason": "job_taken"}
+    conn.execute(
+        "UPDATE jobs SET driver_id=?, lifecycle_status='assigned', sequence_position=NULL, "
+        "updated_at=? WHERE docket_number=?", (driver_id, _now(), o["docket_number"]))
+    conn.execute("UPDATE offers SET status='accepted', responded_at=? WHERE id=?",
+                 (_now(), offer_id))
+    conn.commit()
+    audit(driver_id, "offer:accept", o["docket_number"], {"offer_id": offer_id})
+    return {"ok": True, "docket_number": o["docket_number"]}
+
+
+def decline_offer(driver_id, offer_id, reason=None) -> Dict[str, Any]:
+    expire_offers()
+    o = _offer_row(offer_id, driver_id)
+    if not o:
+        return {"ok": False, "reason": "not_found"}
+    if o["status"] != "pending":
+        return {"ok": False, "reason": "offer_closed", "status": o["status"]}
+    reason = (str(reason).strip()[:200] or None) if reason else None
+    conn = get_connection()
+    conn.execute(
+        "UPDATE offers SET status='declined', decline_reason=?, responded_at=? WHERE id=?",
+        (reason, _now(), offer_id))
+    conn.commit()
+    audit(driver_id, "offer:decline", o["docket_number"],
+          {"offer_id": offer_id, "reason": reason})
+    return {"ok": True, "docket_number": o["docket_number"]}
+
+
 # ── Messages ─────────────────────────────────────────────────────────
 
 def list_messages(driver_id) -> List[Dict[str, Any]]:

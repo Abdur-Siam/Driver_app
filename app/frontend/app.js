@@ -19,7 +19,7 @@ const LS = {
 const S = {
   token: localStorage.getItem(LS.token) || null,
   driver: JSON.parse(localStorage.getItem(LS.driver) || 'null'),
-  run: [], job: null, messages: [], unread: 0,
+  run: [], job: null, messages: [], unread: 0, offers: [],
   mapsKey: null, tracking: localStorage.getItem(LS.tracking) === '1',
   geoWatch: null, pings: [], scan: null, lastPos: null,
   routeSource: 'tom',              // 'tom' = authoritative dispatch order, 'local' = on-device offline fallback
@@ -162,6 +162,7 @@ async function loadRun() {
   }
 }
 async function loadJob(docket) { try { const r = await api('/jobs/' + docket); S.job = r.ok ? r.data.job : null; } catch (e) { S.job = null; } }
+async function loadOffers() { try { const r = await api('/offers'); if (r.ok) S.offers = r.data.offers || []; } catch (e) {} }
 async function loadMessages() { try { const r = await api('/messages'); if (r.ok) { S.messages = r.data.messages; S.unread = r.data.messages.filter(m => m.direction === 'ops' && !m.read).length; } } catch (e) {} }
 // Opening the inbox marks ops messages read (clears the badge server-side too).
 async function markMessagesRead() {
@@ -300,10 +301,67 @@ function loginScreen() {
   return v;
 }
 
+/* ── job offers (accept/decline with countdown) ── */
+function offerCountdownLabel(expiresAt) {
+  const s = Math.max(0, Math.round((new Date(expiresAt) - Date.now()) / 1000));
+  return s >= 60 ? `⏳ ${Math.floor(s / 60)}m ${s % 60}s` : `⏳ ${s}s`;
+}
+function offerCard(o) {
+  const c = el(`<div class="card" style="border-color:var(--warn)">
+    <div class="row"><div class="stack">
+      <div style="font-weight:700">📨 Job offer · ${esc(o.account || 'Job')}</div>
+      <div class="muted small">${esc(o.pickup_postcode || o.pickup_address || '')} → ${o.drops} drop${o.drops !== 1 ? 's' : ''}${o.deadline ? ' · by ' + esc(o.deadline) : ''}</div>
+      <div class="muted small">${o.driver_pay_final ? gbp(o.driver_pay_final) + ' · ' : ''}<span class="mono tiny">${esc(o.docket_number)}</span></div>
+    </div><span class="pill amber offer-count" data-exp="${esc(o.expires_at)}">${offerCountdownLabel(o.expires_at)}</span></div>
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn ok sm" style="flex:1">✔ Accept</button>
+      <button class="btn danger sm">Decline</button>
+    </div></div>`);
+  const [acc, dec] = c.querySelectorAll('.btn-row button');
+  acc.onclick = () => respondOffer(o, true);
+  dec.onclick = () => declineOfferSheet(o);
+  return c;
+}
+async function respondOffer(o, accept, reason) {
+  // Offers are time-boxed, so no offline outbox here: a queued accept could
+  // land after expiry and mislead the driver. Online-only, failure visible.
+  let r;
+  try {
+    r = await api(`/offers/${o.offer_id}/${accept ? 'accept' : 'decline'}`,
+      { method: 'POST', body: accept ? {} : { reason: reason || '' } });
+  } catch (e) { return toast('No connection — try again', true); }
+  if (r.ok) toast(accept ? 'Job added to your run ✔' : 'Offer declined');
+  else {
+    const code = r.data && r.data.error && r.data.error.code;
+    toast(code === 'job_taken' ? 'That job is no longer available' : 'Offer already closed', true);
+  }
+  await Promise.all([loadOffers(), loadRun()]); render();
+}
+function declineOfferSheet(o) {
+  const bg = el(`<div class="sheet-bg"><div class="sheet">
+    <h3>Decline this offer?</h3>
+    <p class="muted small">The job goes back to dispatch with your reason.</p>
+    <label>Reason (optional)</label><input id="decreason" type="text" placeholder="e.g. too far, finishing soon" />
+    <div class="btn-row" style="margin-top:14px"><button class="btn secondary" id="no">Back</button>
+    <button class="btn danger" id="yes">Decline offer</button></div></div></div>`);
+  bg.querySelector('#no').onclick = () => bg.remove();
+  bg.addEventListener('click', e => { if (e.target === bg) bg.remove(); });
+  bg.querySelector('#yes').onclick = () => {
+    const rs = bg.querySelector('#decreason').value.trim(); bg.remove(); respondOffer(o, false, rs);
+  };
+  document.body.appendChild(bg);
+}
+function offersBlock(main) {
+  if (!S.offers.length) return;
+  main.appendChild(el(`<div class="section-title" style="margin-top:0">Offer${S.offers.length !== 1 ? 's' : ''} — respond before the timer runs out</div>`));
+  S.offers.forEach(o => main.appendChild(offerCard(o)));
+}
+
 function runScreen() {
   const wrap = el('<div></div>');
   wrap.appendChild(el(header('Today', new Date().toDateString())));
   const main = el('<main></main>');
+  offersBlock(main);
   const total = S.run.length;
   const local = S.routeSource === 'local';
   const srcLine = local
@@ -916,6 +974,7 @@ function homeScreen() {
   const wrap = el('<div></div>');
   wrap.appendChild(el(header(`${greet}, ${(d.name || '').split(' ')[0]}`, new Date().toDateString())));
   const main = el('<main></main>');
+  offersBlock(main);
   main.appendChild(shiftBlock());
   main.appendChild(el(`<div class="card" style="background:var(--accent-d)">
     <div class="muted small" style="color:#cfe2fb">Earned today</div>
@@ -1640,10 +1699,10 @@ async function render() {
   if (!S.token && route !== 'login') return go('#/login');
   let view;
   if (route === 'login') view = loginScreen();
-  else if (route === 'home') { await Promise.all([loadHome(), loadMessages()]); view = homeScreen(); }
+  else if (route === 'home') { await Promise.all([loadHome(), loadMessages(), loadOffers()]); view = homeScreen(); }
   else if (route === 'shift-start') view = shiftStartScreen();
   else if (route === 'history') { await loadHistory(); view = historyScreen(); }
-  else if (route === 'run') { await loadRun(); view = runScreen(); }
+  else if (route === 'run') { await Promise.all([loadRun(), loadOffers()]); view = runScreen(); }
   else if (route === 'job') { await loadJob(parts[1]); view = jobScreen(); }
   else if (route === 'scan') { if (!S.job || S.job.docket_number !== parts[1]) await loadJob(parts[1]); view = scanScreen(parts[1], parts[2], parts[3]); }
   else if (route === 'pod') { if (!S.job || S.job.docket_number !== parts[1]) await loadJob(parts[1]); view = podScreen(parts[1], parts[2]); }
@@ -1684,11 +1743,46 @@ window.addEventListener('online', async () => {
 });
 window.addEventListener('offline', () => { showOfflineBanner(true); beep(); syncChip(); });
 
-// Live shift countdown ticker — updates the header clock once a second.
+// Live shift countdown ticker — updates the header clock once a second, and
+// keeps any offer-card countdowns live (an offer that hits zero re-syncs and
+// disappears — the server has lazily expired it).
 setInterval(() => {
   const el2 = document.getElementById('shiftclock');
   if (el2 && S.shift) { const r = shiftRemaining(S.shift.planned_end); if (r) el2.textContent = r.label; }
+  document.querySelectorAll('.offer-count[data-exp]').forEach(n => {
+    const left = new Date(n.dataset.exp) - Date.now();
+    if (left <= 0) {
+      if (!n.dataset.expired) { n.dataset.expired = '1'; n.textContent = '⏳ expired'; loadOffers().then(render); }
+    } else n.textContent = offerCountdownLabel(n.dataset.exp);
+  });
 }, 1000);
+
+/* ── gentle background poll (run list + offers) ──
+   Every 30 s while ON SHIFT, plus immediately when the app regains
+   visibility. Only refreshes the run/home screens, and never while a modal
+   sheet is open or a form screen (scan/POD/fail) is showing — polling must
+   not stomp in-progress work. */
+let _pollBusy = false;
+async function pollRefresh(force) {
+  if (_pollBusy || !S.token || !navigator.onLine) return;
+  if (document.visibilityState !== 'visible') return;
+  const route = (location.hash || '#/home').slice(2).split('/')[0] || 'home';
+  if (!['run', 'home'].includes(route)) return;      // form screens are sacred
+  if (document.querySelector('.sheet-bg')) return;   // modal open — don't stomp
+  if (!force && !S.shift) return;                    // interval poll only while on shift
+  _pollBusy = true;
+  try {
+    const beforeRun = JSON.stringify(S.run), beforeOffers = JSON.stringify(S.offers);
+    const hadOffers = S.offers.length;
+    await Promise.all([loadRun(), loadOffers()]);
+    if (S.offers.length > hadOffers) toast('📨 New job offer');
+    if (JSON.stringify(S.run) !== beforeRun || JSON.stringify(S.offers) !== beforeOffers) render();
+  } finally { _pollBusy = false; }
+}
+setInterval(pollRefresh, 30000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') pollRefresh(true);
+});
 
 /* Native biometric app-lock: when enabled and available, require Face/Touch ID
    before the app is shown. No-op on the web PWA (which has no biometric API). */

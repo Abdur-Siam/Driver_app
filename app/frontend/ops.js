@@ -358,6 +358,19 @@ async function viewJobs() {
   $('#c').querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => { S.jobsTab = b.dataset.t; viewJobs(); }));
   await loadJobs();
 }
+// Offer state on an unassigned row: pending countdown, or the decline/expiry
+// outcome (with the driver's reason) that put it back on this board.
+function offerCell(j) {
+  if (j.driver_name) return esc(j.driver_name);
+  const o = j.offer;
+  if (!o) return '<span class="pill grey">unassigned</span>';
+  const who = esc(o.driver_name || o.driver_id);
+  if (o.status === 'pending') return `<span class="pill blue">offered → ${who}</span>`;
+  if (o.status === 'declined')
+    return `<span class="pill red">declined · ${who}</span>${o.decline_reason ? `<div class="tiny muted">“${esc(o.decline_reason)}”</div>` : ''}`;
+  if (o.status === 'expired') return `<span class="pill amber">offer expired · ${who}</span>`;
+  return '<span class="pill grey">unassigned</span>';
+}
 async function loadJobs() {
   let jobs = [];
   try { jobs = (await apiFetch('/jobs?status=' + S.jobsTab)).jobs; } catch (e) { $('#joblist').innerHTML = '<div class="err-txt">' + esc(e.message) + '</div>'; return; }
@@ -369,7 +382,7 @@ async function loadJobs() {
       const prog = `${pr.drops_delivered}/${pr.drops_total} drops${pr.has_failure ? ' <span class="pill red">fail</span>' : ''}`;
       return `<tr class="click" data-d="${esc(j.docket_number)}">
         <td class="mono">${esc(j.docket_number)}</td><td>${esc(j.account || '—')}</td>
-        <td>${j.driver_name ? esc(j.driver_name) : '<span class="pill grey">unassigned</span>'}</td>
+        <td>${offerCell(j)}</td>
         <td>${esc(j.deadline || '—')}</td><td>${lifePill(j.lifecycle_status)}</td>
         <td class="small">${prog}</td><td class="mono">${money(j.driver_pay_final)}</td></tr>`;
     }).join('')}</tbody></table></div>`;
@@ -396,11 +409,16 @@ async function openJob(docket) {
     ${job.pickup.contact ? `<div class="tiny muted">${esc(job.pickup.contact)}</div>` : ''}
     ${job.special_instructions ? `<div class="tiny" style="color:var(--warn)">⚠ ${esc(job.special_instructions)}</div>` : ''}
     <div class="section-title">Drops (${job.drops.length})</div>${dropRows}
+    ${job.offer ? `<div class="section-title">Last offer</div>
+      <div class="kv"><span class="k">${esc(job.offer.driver_name || job.offer.driver_id)}</span>
+        <span class="pill ${job.offer.status === 'pending' ? 'blue' : job.offer.status === 'accepted' ? 'green' : job.offer.status === 'declined' ? 'red' : 'amber'}">${esc(job.offer.status)}</span></div>
+      ${job.offer.decline_reason ? `<div class="tiny muted">Reason: “${esc(job.offer.decline_reason)}”</div>` : ''}` : ''}
     ${closed ? '' : `<div class="section-title">Assign driver</div>
       <select id="asgn"><option value="">— Unassigned —</option>${opts}</select>
       <div style="height:12px"></div>
       <div class="btn-row">
         <button class="btn" id="doasgn" data-d="${esc(docket)}">Update assignment</button>
+        ${job.driver_id ? '' : `<button class="btn secondary" id="dooffer" data-d="${esc(docket)}">Offer</button>`}
         <button class="btn danger" id="docancel" data-d="${esc(docket)}">Cancel job</button>
       </div>`}
     ${job.driver_id ? `<div style="height:12px"></div><button class="btn secondary" id="jmsg">Message driver</button>` : ''}
@@ -410,6 +428,16 @@ async function openJob(docket) {
       try { await apiFetch('/jobs/' + encodeURIComponent(docket) + '/assign', { method: 'POST', body: JSON.stringify({ driver_id: $('#asgn').value }) });
         toast('Assignment updated'); closeDrawer(); await refreshDash(); go('jobs'); }
       catch (e) { toast(e.message, true); }
+    });
+    const offerBtn = $('#dooffer');
+    if (offerBtn) offerBtn.addEventListener('click', async () => {
+      const drv = $('#asgn').value;
+      if (!drv) { toast('Pick a driver to offer the job to', true); return; }
+      try {
+        const r = await apiFetch('/jobs/' + encodeURIComponent(docket) + '/offer',
+          { method: 'POST', body: JSON.stringify({ driver_id: drv }) });
+        toast(`Offered to ${drv} — expires in ${r.ttl_s}s`); closeDrawer(); await refreshDash(); go('jobs');
+      } catch (e) { toast(e.message, true); }
     });
     $('#docancel').addEventListener('click', async () => {
       if (!confirm('Cancel job ' + docket + '? The assigned driver is notified.')) return;

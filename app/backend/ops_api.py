@@ -222,6 +222,27 @@ def job_assign(docket):
     return jsonify({"success": True, **r})
 
 
+@ops_api.route("/jobs/<docket>/offer", methods=["POST"])
+@require_ops
+def job_offer(docket):
+    """Offer an unassigned job to a driver (countdown accept/decline) instead
+    of direct-assigning it. Decline/expiry returns it to the unassigned board
+    flagged with the outcome."""
+    body = request.get_json(silent=True) or {}
+    r = ops_store.offer_job(docket, body.get("driver_id"), g.ops_user, body.get("expires_in_s"))
+    if not r["ok"]:
+        codes = {
+            "job_not_found": ("job_not_found", "Job not found", 404),
+            "job_closed": ("job_closed", "Job is completed or cancelled", 409),
+            "job_assigned": ("job_assigned", "Unassign the job before offering it", 409),
+            "driver_not_found": ("driver_not_found", "Driver not found", 404),
+            "driver_inactive": ("driver_inactive", "That driver is not active", 409),
+        }
+        c, m, s = codes.get(r["reason"], (r["reason"], "Could not offer", 400))
+        return _err(c, m, s)
+    return jsonify({"success": True, **r}), 201
+
+
 @ops_api.route("/jobs/<docket>/cancel", methods=["POST"])
 @require_ops
 def job_cancel(docket):

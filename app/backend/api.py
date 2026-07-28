@@ -363,6 +363,40 @@ def job_fail(docket):
     return _idempotent("fail", do)
 
 
+# ── job offers ───────────────────────────────────────────────────────
+
+@api.route("/offers", methods=["GET"])
+@require_token
+def offers_get():
+    """Live offers for this driver (poll-driven; expiry applied lazily)."""
+    return jsonify({"offers": store.list_offers(g.driver_id), "now": store._now()})
+
+
+@api.route("/offers/<int:offer_id>/accept", methods=["POST"])
+@require_token
+def offer_accept(offer_id):
+    r = store.accept_offer(g.driver_id, offer_id)
+    if not r["ok"]:
+        if r["reason"] == "not_found":
+            return _err("offer_not_found", "Offer not found", 404)
+        if r["reason"] == "job_taken":
+            return _err("job_taken", "This job is no longer available", 409)
+        return _err("offer_closed", "This offer has expired or was already answered", 409)
+    return jsonify({"success": True, **r})
+
+
+@api.route("/offers/<int:offer_id>/decline", methods=["POST"])
+@require_token
+def offer_decline(offer_id):
+    body = request.get_json(silent=True) or {}
+    r = store.decline_offer(g.driver_id, offer_id, body.get("reason"))
+    if not r["ok"]:
+        if r["reason"] == "not_found":
+            return _err("offer_not_found", "Offer not found", 404)
+        return _err("offer_closed", "This offer has expired or was already answered", 409)
+    return jsonify({"success": True, **r})
+
+
 # ── location ─────────────────────────────────────────────────────────
 
 @api.route("/location/batch", methods=["POST"])

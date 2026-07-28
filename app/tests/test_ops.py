@@ -287,3 +287,126 @@ def test_tracking_snapshot_flags_stale_fixes(client):
     get_connection().commit()
     snap = client.get(OPS + "/tracking", headers=h).get_json()["drivers"]
     assert {s["driver_id"]: s for s in snap}["DRV001"]["stale"] is True
+
+
+# ── job offers (offer / accept / decline / expiry) ───────────────────
+
+def _offer(client, h, docket, driver_id="DRV001", **body):
+    return client.post(OPS + f"/jobs/{docket}/offer",
+                       json={"driver_id": driver_id, **body}, headers=h)
+
+
+def test_offer_accept_assigns_job(client):
+    h = _ops(client)
+    docket = _make_job(client, h).get_json()["docket"]
+    r = _offer(client, h, docket)
+    assert r.status_code == 201, r.data
+    b = r.get_json()
+    assert b["offer_id"] and b["expires_at"] and b["ttl_s"] == 120   # default TTL
+    # The driver sees the offer with a live countdown and the job summary.
+    dh = _driver(client, "DRV001")
+    offers = client.get(DRV + "/offers", headers=dh).get_json()["offers"]
+    assert len(offers) == 1
+    o = offers[0]
+    assert o["docket_number"] == docket and 0 < o["expires_in_s"] <= 120
+    assert o["account"] == "TESTCO" and o["drops"] == 1
+    # Accept → normal assigned flow.
+    assert client.post(DRV + f"/offers/{o['offer_id']}/accept", headers=dh).status_code == 200
+    run = {j["docket_number"] for j in client.get(DRV + "/run", headers=dh).get_json()["jobs"]}
+    assert docket in run
+    job = client.get(OPS + "/jobs/" + docket, headers=h).get_json()["job"]
+    assert job["driver_id"] == "DRV001" and job["lifecycle_status"] == "assigned"
+    # No live offers left.
+    assert client.get(DRV + "/offers", headers=dh).get_json()["offers"] == []
+
+
+def test_offer_decline_returns_job_with_reason(client):
+    h = _ops(client)
+    docket = _make_job(client, h).get_json()["docket"]
+    oid = _offer(client, h, docket).get_json()["offer_id"]
+    dh = _driver(client, "DRV001")
+    r = client.post(DRV + f"/offers/{oid}/decline", json={"reason": "too far"}, headers=dh)
+    assert r.status_code == 200
+    # Back on the unassigned board, flagged declined with the reason visible.
+    rows = client.get(OPS + "/jobs?status=unassigned", headers=h).get_json()["jobs"]
+    row = next(j for j in rows if j["docket_number"] == docket)
+    assert row["offer"]["status"] == "declined"
+    assert row["offer"]["decline_reason"] == "too far"
+    assert row["offer"]["driver_id"] == "DRV001"
+    # The job stays unassigned; the driver's offer list is empty.
+    assert row["driver_id"] is None
+    assert client.get(DRV + "/offers", headers=dh).get_json()["offers"] == []
+    # Answering the same offer again is a conflict.
+    assert client.post(DRV + f"/offers/{oid}/decline", headers=dh).status_code == 409
+    assert client.post(DRV + f"/offers/{oid}/accept", headers=dh).status_code == 409
+
+
+def test_offer_expiry_flags_board(client):
+    h = _ops(client)
+    docket = _make_job(client, h).get_json()["docket"]
+    oid = _offer(client, h, docket).get_json()["offer_id"]
+    # Force the deadline into the past (lazy expiry runs on the next read).
+    from backend.db import get_connection
+    conn = get_connection()
+    conn.execute("UPDATE offers SET expires_at = '2000-01-01T00:00:00Z' WHERE id = ?", (oid,))
+    conn.commit()
+    dh = _driver(client, "DRV001")
+    assert client.get(DRV + "/offers", headers=dh).get_json()["offers"] == []
+    rows = client.get(OPS + "/jobs?status=unassigned", headers=h).get_json()["jobs"]
+    row = next(j for j in rows if j["docket_number"] == docket)
+    assert row["offer"]["status"] == "expired"
+    # Accepting after expiry is refused.
+    assert client.post(DRV + f"/offers/{oid}/accept", headers=dh).status_code == 409
+
+
+def test_offer_validation(client):
+    h = _ops(client)
+    # Assigned job cannot be offered.
+    assigned = _make_job(client, h, driver_id="DRV001").get_json()["docket"]
+    r = _offer(client, h, assigned)
+    assert r.status_code == 409 and r.get_json()["error"]["code"] == "job_assigned"
+    # Unknown driver / unknown job.
+    docket = _make_job(client, h).get_json()["docket"]
+    assert _offer(client, h, docket, driver_id="NOPE").status_code == 404
+    assert _offer(client, h, "XM-GHOST-0001").status_code == 404
+    # TTL override is clamped to a sane window.
+    b = _offer(client, h, docket, expires_in_s=999999).get_json()
+    assert b["ttl_s"] == 3600
+
+
+def test_offer_withdrawn_when_job_taken(client):
+    h = _ops(client)
+    docket = _make_job(client, h).get_json()["docket"]
+    oid = _offer(client, h, docket).get_json()["offer_id"]
+    # Ops direct-assigns to someone else while the offer is open.
+    assert client.post(OPS + f"/jobs/{docket}/assign", json={"driver_id": "CX014"}, headers=h).status_code == 200
+    dh = _driver(client, "DRV001")
+    r = client.post(DRV + f"/offers/{oid}/accept", headers=dh)
+    assert r.status_code == 409 and r.get_json()["error"]["code"] == "job_taken"
+    # CX014 keeps the job.
+    assert client.get(OPS + "/jobs/" + docket, headers=h).get_json()["job"]["driver_id"] == "CX014"
+
+
+def test_reoffer_withdraws_previous_offer(client):
+    h = _ops(client)
+    docket = _make_job(client, h).get_json()["docket"]
+    first = _offer(client, h, docket, driver_id="DRV001").get_json()["offer_id"]
+    _offer(client, h, docket, driver_id="CX014")
+    # DRV001's offer is gone (withdrawn); CX014 holds the live one.
+    dh1 = _driver(client, "DRV001")
+    assert client.get(DRV + "/offers", headers=dh1).get_json()["offers"] == []
+    assert client.post(DRV + f"/offers/{first}/accept", headers=dh1).status_code == 409
+    dh2 = _driver(client, "CX014")
+    offers = client.get(DRV + "/offers", headers=dh2).get_json()["offers"]
+    assert len(offers) == 1 and offers[0]["docket_number"] == docket
+
+
+def test_offer_ownership_enforced(client):
+    h = _ops(client)
+    docket = _make_job(client, h).get_json()["docket"]
+    oid = _offer(client, h, docket, driver_id="DRV001").get_json()["offer_id"]
+    # Another driver cannot see or answer it.
+    dh2 = _driver(client, "CX014")
+    assert client.get(DRV + "/offers", headers=dh2).get_json()["offers"] == []
+    assert client.post(DRV + f"/offers/{oid}/accept", headers=dh2).status_code == 404
+    assert client.post(DRV + f"/offers/{oid}/decline", headers=dh2).status_code == 404
