@@ -1,9 +1,12 @@
-"""Provision real drivers on a commercial Driver App deploy.
+"""Provision real drivers on a deployed Driver App.
 
-Production never seeds demo data, so this is how driver accounts are
-created and managed until the TOM merge (after which TOM's driver
-roster + driver_auth_store own this). Run on the server (or against
-the same DRIVER_APP_DATA_DIR / DRIVER_APP_DB the app uses):
+This script is intended for administering driver accounts on a deployed,
+commercial Driver App instance. Production deployments do not seed demo
+drivers, so operator tooling like this is used to create and manage
+real driver accounts until the TOM merge (after which TOM's driver
+roster + driver_auth_store own this data).
+
+Usage (run on the server or against the same DB the app uses):
 
     cd Driver/app
     python3 tools/provision_driver.py add DRV010 "Sam Patel" S10 --vehicle "Small Van" --phone 07700900123
@@ -12,8 +15,10 @@ the same DRIVER_APP_DATA_DIR / DRIVER_APP_DB the app uses):
     python3 tools/provision_driver.py activate DRV010
     python3 tools/provision_driver.py list
 
-Passwords are prompted (never taken as an argument — they'd land in
-shell history / process lists) and stored as scrypt hashes.
+Passwords are prompted interactively (never accepted as a CLI argument,
+to avoid shell history / process-list leakage) and are stored as scrypt
+hashes (see backend.auth for implementation details). Resetting a
+password also revokes active tokens for that driver to force re-login.
 """
 from __future__ import annotations
 
@@ -38,22 +43,38 @@ def _prompt_password(driver_id: str) -> str:
     return pw
 
 
-def _require(conn, driver_id: str):
+def _require(conn, driver_id: str) -> None:
     row = conn.execute("SELECT driver_id FROM drivers WHERE driver_id = ?", (driver_id,)).fetchone()
     if not row:
         sys.exit(f"No such driver: {driver_id}")
 
 
 def cmd_add(conn, a) -> None:
-    if conn.execute("SELECT 1 FROM drivers WHERE driver_id = ? OR lower(callsign) = ?",
-                    (a.driver_id, a.callsign.lower())).fetchone():
+    # basic callsign validation
+    if not a.callsign or not a.callsign.strip():
+        sys.exit("Refused: callsign cannot be empty")
+
+    # Case-insensitive callsign uniqueness check inside SQL for correctness across DB collations
+    if conn.execute(
+        "SELECT 1 FROM drivers WHERE driver_id = ? OR lower(callsign) = lower(?)",
+        (a.driver_id, a.callsign),
+    ).fetchone():
         sys.exit(f"Refused: driver id {a.driver_id} or callsign {a.callsign} already exists")
+
     pw = _prompt_password(a.driver_id)
+
     conn.execute(
         "INSERT INTO drivers (driver_id, name, callsign, password_hash, vehicle, "
         "is_subcontracted, active, phone) VALUES (?,?,?,?,?,?,1,?)",
-        (a.driver_id, a.name, a.callsign, auth.hash_password(pw), a.vehicle,
-         1 if a.subcontractor else 0, a.phone),
+        (
+            a.driver_id,
+            a.name,
+            a.callsign,
+            auth.hash_password(pw),
+            a.vehicle,
+            1 if a.subcontractor else 0,
+            a.phone,
+        ),
     )
     conn.commit()
     print(f"Created {a.driver_id} ({a.name}, callsign {a.callsign})")
@@ -79,13 +100,16 @@ def _set_active(conn, driver_id: str, active: int) -> None:
 
 def cmd_list(conn, _a) -> None:
     rows = conn.execute(
-        "SELECT driver_id, name, callsign, vehicle, is_subcontracted, active "
-        "FROM drivers ORDER BY driver_id").fetchall()
+        "SELECT driver_id, name, callsign, vehicle, is_subcontracted, active, phone "
+        "FROM drivers ORDER BY driver_id"
+    ).fetchall()
     for r in rows:
         kind = "sub" if r["is_subcontracted"] else "own"
         state = "active" if r["active"] else "INACTIVE"
-        print(f"{r['driver_id']:<8} {r['callsign']:<6} {kind:<4} {state:<8} "
-              f"{r['name']}  ({r['vehicle'] or 'no vehicle'})")
+        print(
+            f"{r['driver_id']:<8} {r['callsign']:<6} {kind:<4} {state:<8} "
+            f"{r['name']}  ({r['vehicle'] or 'no vehicle'}) phone={r.get('phone') or 'n/a'}"
+        )
     print(f"{len(rows)} driver(s)")
 
 
