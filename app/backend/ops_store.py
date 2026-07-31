@@ -86,7 +86,8 @@ def list_drivers() -> List[Dict[str, Any]]:
         d["current_docket"] = _current_docket(did)
         d["unread_from_driver"] = unread
         d["last_fix"] = loc
-        d["last_fix_age_s"] = _age_seconds(loc["recorded_at"]) if loc else None
+        # Guard against missing recorded_at in the latest_location result
+        d["last_fix_age_s"] = _age_seconds(loc.get("recorded_at")) if loc else None
         out.append(d)
     return out
 
@@ -130,13 +131,13 @@ def tracking_snapshot() -> List[Dict[str, Any]]:
         loc = store.latest_location(did)
         if not loc or loc.get("lat") is None or loc.get("lng") is None:
             continue
-        age = _age_seconds(loc["recorded_at"])
+        age = _age_seconds(loc.get("recorded_at"))
         out.append({
             "driver_id": did, "name": r["name"], "callsign": r["callsign"],
             "vehicle": r["vehicle"], "duty_status": r["duty_status"],
             "on_shift": bool(store.get_active_shift(did)),
-            "lat": loc["lat"], "lng": loc["lng"],
-            "recorded_at": loc["recorded_at"], "age_s": age,
+            "lat": loc.get("lat"), "lng": loc.get("lng"),
+            "recorded_at": loc.get("recorded_at"), "age_s": age,
             "stale": age is None or age > STALE_FIX_S,
             "current_docket": _current_docket(did),
         })
@@ -177,7 +178,7 @@ def list_jobs(status: str = "active", limit: int = 200) -> List[Dict[str, Any]]:
     """status: active | unassigned | completed | all."""
     store.expire_offers()   # keep offer flags honest on every board read
     conn = get_connection()
-    where, params = "", []
+    where = ""
     status = (status or "active").lower()
     if status == "active":
         where = "WHERE status NOT IN ('COMPLETED','CANCELLED')"
@@ -190,12 +191,17 @@ def list_jobs(status: str = "active", limit: int = 200) -> List[Dict[str, Any]]:
         f"pickup_postcode, deadline, operational_date, driver_pay_final, requires_scan, "
         f"updated_at FROM jobs {where} "
         f"ORDER BY (status IN ('COMPLETED','CANCELLED')), (driver_id IS NULL) DESC, "
-        f"deadline, docket_number LIMIT ?", (*params, max(1, min(int(limit), 500))),
+        f"deadline, docket_number LIMIT ?", (max(1, min(int(limit), 500)),),
     ).fetchall()
     out = []
     for r in rows:
         j = dict(r)
-        j["requires_scan"] = bool(j.get("requires_scan", 1))
+        # DB may store requires_scan as 1/0 or "1"/"0" or True/False; normalize to proper bool
+        rs_val = j.get("requires_scan", 1)
+        try:
+            j["requires_scan"] = bool(int(rs_val))
+        except (TypeError, ValueError):
+            j["requires_scan"] = bool(rs_val)
         drv = store.get_driver(j["driver_id"]) if j.get("driver_id") else None
         j["driver_name"] = drv["name"] if drv else None
         j["progress"] = _job_progress(j["docket_number"])
@@ -444,7 +450,8 @@ def send_message(driver_id, text: str, actor: str, docket: Optional[str] = None)
 def thread(driver_id, docket: Optional[str] = None) -> List[Dict[str, Any]]:
     msgs = store.list_messages(driver_id)
     if docket:
-        msgs = [m for m in msgs if m.get("docket_number") == docket]
+        # Support both possible message key names for docket ("docket_number" or "docket")
+        msgs = [m for m in msgs if (m.get("docket_number") or m.get("docket")) == docket]
     return list(reversed(msgs))   # oldest-first for a chat view
 
 
@@ -457,7 +464,7 @@ def mark_thread_read(driver_id) -> int:
     return cur.rowcount
 
 
-# ── Dashboard ────────────────────────────────────────────────────────
+# ── Dashboard ───────────────────────────────────────────────────────
 
 def dashboard() -> Dict[str, Any]:
     conn = get_connection()
