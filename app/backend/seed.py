@@ -12,8 +12,17 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
-from .auth import hash_password
-from .db import get_connection
+# Support running as a package (preferred) or as a script for convenience.
+try:
+    from .auth import hash_password
+    from .db import get_connection
+except Exception:  # pragma: no cover - fallback for direct execution
+    # When run as a script (python app/backend/seed.py) the relative imports
+    # above will fail with "attempted relative import with no known parent
+    # package". Try absolute imports so the module can still run when the
+    # repository root is on PYTHONPATH or when executed as a script.
+    from app.backend.auth import hash_password
+    from app.backend.db import get_connection
 
 TODAY = date(2026, 6, 26)
 
@@ -131,7 +140,8 @@ def _ins_statement(conn, driver_id, label, start_off, end_off, freq, status, ref
 
 def seed_if_empty() -> bool:
     conn = get_connection()
-    if conn.execute("SELECT COUNT(*) AS n FROM drivers").fetchone()["n"] > 0:
+    # Use positional index to support sqlite3 connections without row factory
+    if conn.execute("SELECT COUNT(*) FROM drivers").fetchone()[0] > 0:
         return False
 
     # ── drivers + profiles ──
@@ -252,3 +262,11 @@ def seed_if_empty() -> bool:
 
     conn.commit()
     return True
+
+
+if __name__ == "__main__":
+    res = seed_if_empty()
+    if res:
+        print("Seeded demo data")
+    else:
+        print("Seed skipped: drivers table not empty")
